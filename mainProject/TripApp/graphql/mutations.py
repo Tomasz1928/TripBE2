@@ -1,12 +1,10 @@
+# graphql/mutations.py
 import strawberry
-from .types import ItemType
-from .queries import items
+from TripApp.graphql.authorization.mutations import AuthMutation
+
 
 @strawberry.type
-class Mutation:
-
-    @strawberry.mutation
-    def add_item(self, name: str) -> ItemType:
-        item = ItemType(name=name)
-        items.append(item)
-        return item
+class Mutation(
+    AuthMutation
+):
+    pass
