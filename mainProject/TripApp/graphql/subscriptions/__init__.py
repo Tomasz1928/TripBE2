@@ -2,6 +2,7 @@ import strawberry
 import asyncio
 from typing import AsyncGenerator
 
+
 @strawberry.type
 class Subscription:
 
@@ -10,3 +11,4 @@ class Subscription:
         for i in range(target):
             yield i
             await asyncio.sleep(1)
+
