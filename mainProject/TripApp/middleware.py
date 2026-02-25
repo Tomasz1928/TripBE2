@@ -1,7 +1,7 @@
 from strawberry.extensions import SchemaExtension
 from strawberry.types import Info
+from asgiref.sync import sync_to_async
 from TripApp.graphql.utils import get_request
-
 
 PUBLIC_OPERATIONS = {
     "loginUser",
@@ -22,7 +22,7 @@ class RequireAuthenticationExtension(SchemaExtension):
     to all queries/mutations except those listed in PUBLIC_OPERATIONS.
     """
 
-    def resolve(self, _next, root, info: Info, *args, **kwargs):
+    async def resolve(self, _next, root, info: Info, *args, **kwargs):
         parent_name = info.parent_type.name if info.parent_type else None
         is_root = parent_name in ("Query", "Mutation", "Subscription")
 
@@ -31,7 +31,11 @@ class RequireAuthenticationExtension(SchemaExtension):
 
             if field_name not in PUBLIC_OPERATIONS:
                 request = get_request(info)
-                if not request.user.is_authenticated:
+                is_auth = await sync_to_async(lambda: request.user.is_authenticated)()
+                if not is_auth:
                     raise PermissionError("Authentication required.")
 
-        return _next(root, info, *args, **kwargs)
+        result = _next(root, info, *args, **kwargs)
+        if hasattr(result, "__await__"):
+            return await result
+        return result
