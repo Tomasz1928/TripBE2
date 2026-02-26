@@ -3,6 +3,12 @@ import string
 from django.http import HttpRequest
 from asgiref.sync import sync_to_async
 from TripApp.models import Trip, Participant
+from TripApp.services.delta_builder import (
+    build_participant_added_delta,
+    build_participant_updated_delta,
+    build_participant_removed_delta,
+)
+from TripApp.services.broadcast import broadcast_delta
 
 
 def _generate_access_code() -> str:
@@ -58,7 +64,11 @@ async def add_placeholder(request: HttpRequest, trip_id: int, nickname: str) -> 
         access_code=access_code,
     )
 
-    return {"success": True, "message": "Placeholder added.", "participant": participant}
+    # Broadcast delta
+    delta = await build_participant_added_delta(trip, participant)
+    await broadcast_delta(trip.trip_id, delta)
+
+    return {"success": True, "message": "Placeholder added."}
 
 
 async def detach_user(request: HttpRequest, trip_id: int, participant_id: int) -> dict:
@@ -68,7 +78,6 @@ async def detach_user(request: HttpRequest, trip_id: int, participant_id: int) -
         participant_id=participant_id, trip=trip
     )
 
-    # Cannot detach yourself (trip owner)
     participant_user_id = await sync_to_async(lambda: participant.user_id)()
     if participant_user_id == user.id:
         return {"success": False, "message": "Cannot detach yourself from the trip."}
@@ -83,7 +92,11 @@ async def detach_user(request: HttpRequest, trip_id: int, participant_id: int) -
     participant.access_code = new_code
     await sync_to_async(participant.save)()
 
-    return {"success": True, "message": "User detached. New access code generated.", "participant": participant}
+    # Broadcast delta
+    delta = await build_participant_updated_delta(trip, participant)
+    await broadcast_delta(trip.trip_id, delta)
+
+    return {"success": True, "message": "User detached. New access code generated."}
 
 
 async def remove_placeholder(request: HttpRequest, trip_id: int, participant_id: int) -> dict:
@@ -93,7 +106,6 @@ async def remove_placeholder(request: HttpRequest, trip_id: int, participant_id:
         participant_id=participant_id, trip=trip
     )
 
-    # Cannot remove yourself
     participant_user_id = await sync_to_async(lambda: participant.user_id)()
     if participant_user_id == user.id:
         return {"success": False, "message": "Cannot remove yourself from the trip."}
@@ -101,7 +113,12 @@ async def remove_placeholder(request: HttpRequest, trip_id: int, participant_id:
     if not participant.is_placeholder:
         return {"success": False, "message": "Cannot remove an active participant. Detach the user first."}
 
+    removed_id = participant.participant_id
     await sync_to_async(participant.delete)()
+
+    # Broadcast delta
+    delta = await build_participant_removed_delta(trip, removed_id)
+    await broadcast_delta(trip.trip_id, delta)
 
     return {"success": True, "message": "Placeholder removed."}
 
@@ -123,7 +140,6 @@ async def join_trip(request: HttpRequest, access_code: str) -> dict:
 
     trip = await sync_to_async(lambda: participant.trip)()
 
-    # Check if user is already in this trip
     already_in = await sync_to_async(
         Participant.objects.filter(trip=trip, user=user).exists
     )()
@@ -135,4 +151,8 @@ async def join_trip(request: HttpRequest, access_code: str) -> dict:
     participant.access_code = None
     await sync_to_async(participant.save)()
 
-    return {"success": True, "message": "Joined trip successfully.", "participant": participant}
+    # Broadcast delta
+    delta = await build_participant_updated_delta(trip, participant)
+    await broadcast_delta(trip.trip_id, delta)
+
+    return {"success": True, "message": "Joined trip successfully."}
