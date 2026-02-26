@@ -1,11 +1,8 @@
 import strawberry
 from typing import List
 from strawberry.types import Info
-from .types import (
-    SettleByAmountPayload,
-    SettleByCostsPayload,
-    SettleByCostsItem,
-)
+from .types import SettleByCostsItem
+from ..shared_types import MutationPayload
 from ..utils import get_request
 from . import service
 
@@ -23,23 +20,13 @@ class SettlementMutation:
         amount: float,
         currency: str,
         is_main_currency: bool,
-    ) -> SettleByAmountPayload:
+    ) -> MutationPayload:
         result = await service.settle_by_amount(
             get_request(info),
-            trip_id,
-            from_user_id,
-            to_user_id,
-            amount,
-            currency,
-            is_main_currency,
+            trip_id, from_user_id, to_user_id,
+            amount, currency, is_main_currency,
         )
-        return SettleByAmountPayload(
-            success=result["success"],
-            message=result["message"],
-            settled_amount=result.get("settled_amount"),
-            leftover_amount=result.get("leftover_amount"),
-            prepayment_created=result.get("prepayment_created"),
-        )
+        return MutationPayload(success=result["success"], message=result["message"])
 
     @strawberry.mutation
     async def settle_by_costs(
@@ -47,7 +34,7 @@ class SettlementMutation:
         info: Info,
         trip_id: int,
         items: List[SettleByCostsItem],
-    ) -> SettleByCostsPayload:
+    ) -> MutationPayload:
         items_dicts = [
             {
                 "expense_id": item.expense_id,
@@ -59,8 +46,4 @@ class SettlementMutation:
         result = await service.settle_by_costs(
             get_request(info), trip_id, items_dicts
         )
-        return SettleByCostsPayload(
-            success=result["success"],
-            message=result["message"],
-            settled_count=result.get("settled_count"),
-        )
+        return MutationPayload(success=result["success"], message=result["message"])

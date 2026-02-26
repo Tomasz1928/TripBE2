@@ -24,13 +24,6 @@ ZERO = Decimal("0.00")
 async def recalculate_settlements(trip: Trip) -> None:
     """
     Rebuild all Settlement records for a trip from scratch.
-
-    For each unsettled split:
-      - participant owes payer `left_to_settlement_amount_in_trip_currency` in trip currency
-      - if expense currency != trip currency, participant also owes payer
-        `left_to_settlement_amount_in_cost_currency` in that currency
-
-    We net out bidirectional debts (A owes B 100, B owes A 30 → A owes B 70).
     """
     trip_currency = trip.default_currency.upper()
 
@@ -43,7 +36,6 @@ async def recalculate_settlements(trip: Trip) -> None:
         )
     )()
 
-    # Aggregate debts
     trip_debts: dict[tuple[int, int], Decimal] = defaultdict(lambda: ZERO)
     other_debts: dict[tuple[int, int, str], Decimal] = defaultdict(lambda: ZERO)
 
@@ -137,18 +129,9 @@ async def settle_by_amount(
     currency: str,
     is_main_currency: bool,
 ) -> dict:
-    """
-    Settle debts between two participants by a given amount.
+    from TripApp.services.delta_builder import build_settlement_changed_delta
+    from TripApp.services.broadcast import broadcast_delta
 
-    If is_main_currency=True:
-      - Settle ALL unsettled splits (any expense currency) from oldest to newest.
-      - Work in trip currency, convert to cost currency using each expense's rate.
-    If is_main_currency=False:
-      - Settle only splits where expense currency matches `currency`.
-      - Work in cost currency, convert to trip currency using each expense's rate.
-
-    Any leftover (after all matching splits are settled) creates a Prepayment.
-    """
     currency = currency.strip().upper()
     amount_dec = Decimal(str(amount))
 
@@ -158,7 +141,6 @@ async def settle_by_amount(
     trip = await sync_to_async(Trip.objects.get)(trip_id=trip_id)
     trip_currency = trip.default_currency.upper()
 
-    # Verify both participants exist in this trip
     try:
         from_participant = await sync_to_async(Participant.objects.get)(
             participant_id=from_user_id, trip=trip
@@ -176,7 +158,6 @@ async def settle_by_amount(
     if from_participant.participant_id == to_participant.participant_id:
         return {"success": False, "message": "Cannot settle with yourself."}
 
-    # Auth check: caller must be one of the two participants
     user = await sync_to_async(lambda: request.user)()
     caller_participant = await sync_to_async(
         lambda: Participant.objects.filter(trip=trip, user=user).first()
@@ -191,7 +172,6 @@ async def settle_by_amount(
     ):
         return {"success": False, "message": "You can only settle debts you are involved in."}
 
-    # Find unsettled splits: from_participant owes to_participant (to_participant paid)
     base_qs = Split.objects.filter(
         participant_id=from_participant.participant_id,
         expense__payer_id=to_participant.participant_id,
@@ -219,14 +199,12 @@ async def settle_by_amount(
         rate = expense.rate
 
         if is_main_currency:
-            # Work in trip currency
             left = split.left_to_settlement_amount_in_trip_currency
             settleable_trip = min(remaining, left)
 
             split.left_to_settlement_amount_in_trip_currency -= settleable_trip
             remaining -= settleable_trip
 
-            # Convert to cost currency
             if rate and rate != ZERO:
                 settleable_cost = (settleable_trip / rate).quantize(Decimal("0.01"))
             else:
@@ -237,14 +215,12 @@ async def settle_by_amount(
                 split.left_to_settlement_amount_in_cost_currency - settleable_cost,
             )
         else:
-            # Work in cost currency
             left = split.left_to_settlement_amount_in_cost_currency
             settleable_cost = min(remaining, left)
 
             split.left_to_settlement_amount_in_cost_currency -= settleable_cost
             remaining -= settleable_cost
 
-            # Convert to trip currency
             settleable_trip = (settleable_cost * rate).quantize(Decimal("0.01"))
             split.left_to_settlement_amount_in_trip_currency = max(
                 ZERO,
@@ -254,10 +230,9 @@ async def settle_by_amount(
         await sync_to_async(split.save)()
 
     # Leftover → Prepayment
-    prepayment = None
     if remaining > ZERO:
         prep_currency = trip_currency if is_main_currency else currency
-        prepayment = await sync_to_async(Prepayment.objects.create)(
+        await sync_to_async(Prepayment.objects.create)(
             trip=trip,
             from_participant=from_participant,
             to_participant=to_participant,
@@ -270,15 +245,16 @@ async def settle_by_amount(
 
     settled_amount = amount_dec - remaining
 
+    # Broadcast delta
+    delta = await build_settlement_changed_delta(trip)
+    await broadcast_delta(trip.trip_id, delta)
+
     return {
         "success": True,
         "message": (
             f"Settled {settled_amount} {currency}."
             + (f" Leftover {remaining} {currency} saved as prepayment." if remaining > ZERO else "")
         ),
-        "settled_amount": float(settled_amount),
-        "leftover_amount": float(remaining),
-        "prepayment_created": prepayment is not None,
     }
 
 
@@ -291,20 +267,14 @@ async def settle_by_costs(
     trip_id: int,
     items: list[dict],
 ) -> dict:
-    """
-    Mark specific splits as fully settled.
+    from TripApp.services.delta_builder import build_settlement_changed_delta
+    from TripApp.services.broadcast import broadcast_delta
 
-    Each item: { expense_id, payer_id, participant_id }
-    Sets left_to_settlement to 0 for matching splits.
-
-    Auth: caller must be either payer or participant for each item.
-    """
     if not items:
         return {"success": False, "message": "No items provided."}
 
     trip = await sync_to_async(Trip.objects.get)(trip_id=trip_id)
 
-    # Auth: get caller's participant
     user = await sync_to_async(lambda: request.user)()
     caller_participant = await sync_to_async(
         lambda: Participant.objects.filter(trip=trip, user=user).first()
@@ -321,7 +291,6 @@ async def settle_by_costs(
         payer_id = item["payer_id"]
         participant_id = item["participant_id"]
 
-        # Auth check: caller must be payer or participant
         if caller_id not in (payer_id, participant_id):
             return {
                 "success": False,
@@ -349,8 +318,11 @@ async def settle_by_costs(
 
     await recalculate_settlements(trip)
 
+    # Broadcast delta
+    delta = await build_settlement_changed_delta(trip)
+    await broadcast_delta(trip.trip_id, delta)
+
     return {
         "success": True,
         "message": f"Settled {settled_count} cost(s).",
-        "settled_count": settled_count,
     }

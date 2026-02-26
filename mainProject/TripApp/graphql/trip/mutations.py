@@ -1,5 +1,7 @@
 import strawberry
+from typing import Optional
 from strawberry.types import Info
+from ..shared_types import MutationPayload
 from ..utils import get_request
 from . import service
 
@@ -8,7 +10,7 @@ from . import service
 class CreateTripPayload:
     success: bool
     message: str
-    trip_id: int | None = None
+    trip_id: Optional[int] = None
 
 
 @strawberry.type
