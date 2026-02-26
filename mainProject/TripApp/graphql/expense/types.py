@@ -27,6 +27,20 @@ class AddExpenseInput:
     shared_with: List[ShareInput]
 
 
+@strawberry.input
+class UpdateExpenseInput:
+    expense_id: int
+    trip_id: int
+    name: str
+    description: str = ""
+    amount: float
+    currency: str
+    category_id: int
+    date: float  # timestamp in ms
+    payer_id: int
+    shared_with: List[ShareInput]
+
+
 @strawberry.type
 class SplitType:
     participant_id: int
@@ -55,3 +69,9 @@ class ExpensePayload:
     success: bool
     message: str
     expense: Optional[ExpenseType] = None
+
+
+@strawberry.type
+class DeleteExpensePayload:
+    success: bool
+    message: str

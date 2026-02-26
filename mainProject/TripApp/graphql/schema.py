@@ -6,20 +6,21 @@ from TripApp.middleware import RequireAuthenticationExtension
 
 from .auth.queries import AuthQuery
 from .auth.mutations import AuthMutation
+from .trip.queries import TripQuery
 from .trip.mutations import TripMutation
 from .expense.mutations import ExpenseMutation
 from .participant.mutations import ParticipantMutation
+from .prepayment.mutations import PrepaymentMutation
+from .settlement.queries import SettlementQuery
+from .settlement.mutations import SettlementMutation
 from .subscriptions import Subscription
 
 Query = merge_types(
     "Query",
     (
         AuthQuery,
-        # TripQuery,
-        # ParticipantQuery,
-        # ExpenseQuery,
-        # SplitQuery,
-        # SettlementQuery,
+        TripQuery,
+        SettlementQuery,
     ),
 )
 
@@ -30,8 +31,8 @@ Mutation = merge_types(
         TripMutation,
         ExpenseMutation,
         ParticipantMutation,
-        # SplitMutation,
-        # SettlementMutation,
+        PrepaymentMutation,
+        SettlementMutation,
     ),
 )
 
