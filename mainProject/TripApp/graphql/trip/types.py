@@ -118,6 +118,7 @@ class TripDetailType:
     categories: List[CategoryType]
     owner_id: int
     im_owner: bool
+    my_participant_id: int
     my_cost: List[SimpleMoneyValueType]
     expenses: List[ExpenseDetailType]
     participants: List[ParticipantDetailType]

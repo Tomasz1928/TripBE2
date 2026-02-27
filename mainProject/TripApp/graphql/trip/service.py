@@ -166,6 +166,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         "categories": categories,
         "owner_id": trip.trip_owner_id,
         "im_owner": trip.trip_owner_id == user.id,
+        "my_participant_id": my_id,
         "my_cost": my_cost,
         "expenses": expenses,
         "participants": participants,
