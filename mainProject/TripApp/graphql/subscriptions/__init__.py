@@ -139,7 +139,7 @@ def _payload_to_delta(payload: dict, participant_id: int) -> TripDelta:
 class Subscription:
 
     @strawberry.subscription
-    async def trip_delta(self, info: strawberry.types.Info, trip_id: int) -> AsyncGenerator[TripDelta, None]:
+    async def trip_updates(self, info: strawberry.types.Info, trip_id: int) -> AsyncGenerator[TripDelta, None]:
         """
         Subscribe to real-time deltas for a specific trip.
 
