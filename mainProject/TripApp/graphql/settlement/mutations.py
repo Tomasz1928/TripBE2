@@ -38,7 +38,6 @@ class SettlementMutation:
         items_dicts = [
             {
                 "expense_id": item.expense_id,
-                "payer_id": item.payer_id,
                 "participant_id": item.participant_id,
             }
             for item in items

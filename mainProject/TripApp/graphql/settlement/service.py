@@ -9,6 +9,7 @@ from collections import defaultdict
 from decimal import Decimal
 from django.http import HttpRequest
 from asgiref.sync import sync_to_async
+from TripApp.services.exchange import get_exchange_rate
 from TripApp.models import (
     Trip, Split, Expense, Participant, Prepayment,
     SettlementTripCurrency, SettlementOtherCurrency,
@@ -24,6 +25,10 @@ ZERO = Decimal("0.00")
 async def recalculate_settlements(trip: Trip) -> None:
     """
     Rebuild all Settlement records for a trip from scratch.
+    Considers both unsettled splits AND unused prepayments.
+
+    SettlementTripCurrency: everything converted to trip currency
+    SettlementOtherCurrency: everything in original currency (including trip currency)
     """
     trip_currency = trip.default_currency.upper()
 
@@ -33,6 +38,15 @@ async def recalculate_settlements(trip: Trip) -> None:
                 expense__trip=trip,
                 is_settlement=False,
             ).select_related("expense", "participant")
+        )
+    )()
+
+    prepayments = await sync_to_async(
+        lambda: list(
+            Prepayment.objects.filter(
+                trip=trip,
+                amount_left__gt=ZERO,
+            )
         )
     )()
 
@@ -52,12 +66,36 @@ async def recalculate_settlements(trip: Trip) -> None:
         if from_id == to_id:
             continue
 
+        # SettlementTripCurrency — always in trip currency
         if left_trip > ZERO:
             trip_debts[(from_id, to_id)] += left_trip
 
+        # SettlementOtherCurrency — in original currency (ALL currencies including trip)
         expense_currency = split.expense.expense_currency.upper()
-        if expense_currency != trip_currency and left_cost > ZERO:
-            other_debts[(from_id, to_id, expense_currency)] += left_cost
+        if expense_currency == trip_currency:
+            # Trip currency expense → use trip amount
+            if left_trip > ZERO:
+                other_debts[(from_id, to_id, trip_currency)] += left_trip
+        else:
+            # Foreign currency expense → use cost amount
+            if left_cost > ZERO:
+                other_debts[(from_id, to_id, expense_currency)] += left_cost
+
+    # Prepayments with remaining balance create reverse debts
+    for prep in prepayments:
+        prep_currency = prep.currency.upper()
+        from_id = prep.to_participant_id
+        to_id = prep.from_participant_id
+
+        if from_id == to_id:
+            continue
+
+        # SettlementTripCurrency — converted via rate
+        amount_in_trip = (prep.amount_left * prep.rate).quantize(Decimal("0.01"))
+        trip_debts[(from_id, to_id)] += amount_in_trip
+
+        # SettlementOtherCurrency — in original currency
+        other_debts[(from_id, to_id, prep_currency)] += prep.amount_left
 
     # Net out trip currency debts
     netted_trip: dict[tuple[int, int], Decimal] = {}
@@ -76,7 +114,7 @@ async def recalculate_settlements(trip: Trip) -> None:
         elif net < ZERO:
             netted_trip[(b, a)] = (-net).quantize(Decimal("0.01"))
 
-    # Net out other currency debts
+    # Net out other currency debts (per currency)
     netted_other: dict[tuple[int, int, str], Decimal] = {}
     processed_other = set()
 
@@ -227,11 +265,19 @@ async def settle_by_amount(
                 split.left_to_settlement_amount_in_trip_currency - settleable_trip,
             )
 
+        split.is_settlement = (
+            split.left_to_settlement_amount_in_trip_currency <= ZERO
+            and split.left_to_settlement_amount_in_cost_currency <= ZERO
+        )
         await sync_to_async(split.save)()
 
     # Leftover → Prepayment
     if remaining > ZERO:
         prep_currency = trip_currency if is_main_currency else currency
+        if is_main_currency:
+            prep_rate = Decimal("1.000000")
+        else:
+            prep_rate = await get_exchange_rate(currency, trip_currency)
         await sync_to_async(Prepayment.objects.create)(
             trip=trip,
             from_participant=from_participant,
@@ -239,6 +285,7 @@ async def settle_by_amount(
             amount=remaining,
             amount_left=remaining,
             currency=prep_currency,
+            rate=prep_rate,
         )
 
     await recalculate_settlements(trip)
@@ -288,8 +335,19 @@ async def settle_by_costs(
 
     for item in items:
         expense_id = item["expense_id"]
-        payer_id = item["payer_id"]
         participant_id = item["participant_id"]
+
+        try:
+            expense = await sync_to_async(
+                Expense.objects.get
+            )(expense_id=expense_id, trip=trip)
+        except Expense.DoesNotExist:
+            return {
+                "success": False,
+                "message": f"Expense {expense_id} not found in this trip.",
+            }
+
+        payer_id = await sync_to_async(lambda: expense.payer_id)()
 
         if caller_id not in (payer_id, participant_id):
             return {
@@ -300,19 +358,18 @@ async def settle_by_costs(
         try:
             split = await sync_to_async(Split.objects.get)(
                 expense_id=expense_id,
-                expense__payer_id=payer_id,
                 participant_id=participant_id,
                 expense__trip=trip,
             )
         except Split.DoesNotExist:
             return {
                 "success": False,
-                "message": f"Split not found for expense {expense_id}, "
-                           f"payer {payer_id}, participant {participant_id}.",
+                "message": f"Split not found for expense {expense_id}, participant {participant_id}.",
             }
 
         split.left_to_settlement_amount_in_cost_currency = ZERO
         split.left_to_settlement_amount_in_trip_currency = ZERO
+        split.is_settlement = True
         await sync_to_async(split.save)()
         settled_count += 1
 

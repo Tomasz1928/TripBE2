@@ -6,6 +6,7 @@ from TripApp.services.reconciliation import apply_prepayment_to_splits
 from ..settlement.service import recalculate_settlements
 from TripApp.services.delta_builder import build_prepayment_delta
 from TripApp.services.broadcast import broadcast_delta
+from ..expense.service import get_exchange_rate
 
 VALID_DIRECTIONS = {"TO_ME", "FROM_ME"}
 
@@ -32,6 +33,7 @@ async def add_prepayment(
         return {"success": False, "message": "Direction must be TO_ME or FROM_ME."}
 
     trip = await sync_to_async(Trip.objects.get)(trip_id=trip_id)
+    trip_currency = trip.default_currency.upper()
 
     user = await sync_to_async(lambda: request.user)()
     try:
@@ -58,7 +60,6 @@ async def add_prepayment(
         from_participant = other_participant
         to_participant = my_participant
 
-    trip_currency = trip.default_currency.upper()
     if currency != trip_currency:
         has_expenses_in_currency = await sync_to_async(
             lambda: Participant.objects.filter(
@@ -76,6 +77,8 @@ async def add_prepayment(
                            f"or a currency used in existing expenses.",
             }
 
+    rate = await get_exchange_rate(currency, trip_currency)
+
     prepayment = await sync_to_async(Prepayment.objects.create)(
         trip=trip,
         from_participant=from_participant,
@@ -83,6 +86,7 @@ async def add_prepayment(
         amount=amount_dec,
         amount_left=amount_dec,
         currency=currency,
+        rate=rate,
     )
 
     await apply_prepayment_to_splits(prepayment, trip)

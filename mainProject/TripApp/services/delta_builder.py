@@ -243,16 +243,25 @@ def _serialize_expense(expense, splits_by_expense, participant_map, trip_currenc
             {"is_main_currency": True, "currency": trip_currency,
              "amount": float(split.amount_in_trip_currency)}
         ]
+        left_for_settlement = [
+            {"is_main_currency": True, "currency": trip_currency,
+             "amount": float(split.left_to_settlement_amount_in_trip_currency)}
+        ]
         if expense_currency != trip_currency:
             split_values.append(
                 {"is_main_currency": False, "currency": expense_currency,
                  "amount": float(split.amount_in_cost_currency)}
+            )
+            left_for_settlement.append(
+                {"is_main_currency": False, "currency": expense_currency,
+                 "amount": float(split.left_to_settlement_amount_in_cost_currency)}
             )
         shared_with.append({
             "participant_id": split.participant_id,
             "participant_nickname": p.nickname if p else "Unknown",
             "split_value": split_values,
             "is_settlement": split.is_settlement,
+            "left_for_settlement": left_for_settlement,
         })
 
     payer = participant_map.get(expense.payer_id)
@@ -379,34 +388,56 @@ def _build_settlement(my_id, trip_currency, trip_settlements, other_settlements,
     return {"relations": relations}
 
 
-def _build_single_relation(my_id, other_id, trip_currency,
-                           trip_settlements, other_settlements,
-                           all_splits, all_prepayments, participant_map) -> dict:
+def _build_single_relation(
+    my_id: int,
+    other_id: int,
+    trip_currency: str,
+    trip_settlements: list,
+    other_settlements: list,
+    all_splits: list,
+    all_prepayments: list,
+    participant_map: dict,
+) -> dict:
     other_p = participant_map.get(other_id)
 
-    # left_for_settled
-    left_trip = ZERO
-    left_other: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    # --- left_for_settled ---
+    left_for_settled = []
 
+    # From SettlementTripCurrency → is_main_currency: true
+    left_trip = ZERO
     for s in trip_settlements:
         if s.from_participant_id == other_id and s.to_participant_id == my_id:
             left_trip += s.amount
         elif s.from_participant_id == my_id and s.to_participant_id == other_id:
             left_trip -= s.amount
 
+    left_for_settled.append({
+        "is_main_currency": True,
+        "currency": trip_currency,
+        "amount": float(left_trip),
+    })
+
+    # From SettlementOtherCurrency → is_main_currency: false
+    left_other: dict[str, Decimal] = defaultdict(lambda: ZERO)
     for s in other_settlements:
         if s.from_participant_id == other_id and s.to_participant_id == my_id:
             left_other[s.currency.upper()] += s.amount
         elif s.from_participant_id == my_id and s.to_participant_id == other_id:
             left_other[s.currency.upper()] -= s.amount
 
-    left_for_settled = [{"is_main_currency": True, "currency": trip_currency, "amount": float(left_trip)}]
     for curr, amt in left_other.items():
-        if curr != trip_currency:
-            left_for_settled.append({"is_main_currency": False, "currency": curr, "amount": float(amt)})
+        left_for_settled.append({
+            "is_main_currency": False,
+            "currency": curr,
+            "amount": float(amt),
+        })
 
-    # all_related_amount
+    # --- all_related_amount ---
+    all_related = []
+
+    # Trip currency total (all splits converted) → is_main_currency: true
     all_related_trip = ZERO
+    # Per original currency → is_main_currency: false
     all_related_other: dict[str, Decimal] = defaultdict(lambda: ZERO)
 
     for split in all_splits:
@@ -418,29 +449,41 @@ def _build_single_relation(my_id, other_id, trip_currency,
 
         if payer_id == my_id and participant_id == other_id:
             all_related_trip += split.amount_in_trip_currency
-            if expense_currency != trip_currency:
+            if expense_currency == trip_currency:
+                all_related_other[trip_currency] += split.amount_in_trip_currency
+            else:
                 all_related_other[expense_currency] += split.amount_in_cost_currency
         elif payer_id == other_id and participant_id == my_id:
             all_related_trip -= split.amount_in_trip_currency
-            if expense_currency != trip_currency:
+            if expense_currency == trip_currency:
+                all_related_other[trip_currency] -= split.amount_in_trip_currency
+            else:
                 all_related_other[expense_currency] -= split.amount_in_cost_currency
 
-    all_related_amount = [{"is_main_currency": True, "currency": trip_currency, "amount": float(all_related_trip)}]
+    all_related.append({
+        "is_main_currency": True,
+        "currency": trip_currency,
+        "amount": float(all_related_trip),
+    })
     for curr, amt in all_related_other.items():
-        if curr != trip_currency:
-            all_related_amount.append({"is_main_currency": False, "currency": curr, "amount": float(amt)})
+        all_related.append({
+            "is_main_currency": False,
+            "currency": curr,
+            "amount": float(amt),
+        })
 
-    # prepayment details
-    prepayment = _build_prepayment_details(my_id, other_id, trip_currency, all_prepayments)
+    # --- Prepayment details ---
+    prepayment = _build_prepayment_details(
+        my_id, other_id, trip_currency, all_prepayments
+    )
 
     return {
         "related_id": other_id,
         "related_name": other_p.nickname if other_p else "Unknown",
         "left_for_settled": left_for_settled,
-        "all_related_amount": all_related_amount,
+        "all_related_amount": all_related,
         "prepayment": prepayment,
     }
-
 
 def _build_prepayment_details(my_id, other_id, trip_currency, all_prepayments) -> dict:
     amount_left_by_currency: dict[str, Decimal] = defaultdict(lambda: ZERO)

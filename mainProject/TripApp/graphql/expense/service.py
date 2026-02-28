@@ -3,7 +3,8 @@ from decimal import Decimal
 from django.http import HttpRequest
 from asgiref.sync import sync_to_async
 from TripApp.models import Trip, Participant, Expense, Split, Prepayment
-from TripApp.services.reconciliation import apply_prepayments_to_split
+from TripApp.services.reconciliation import apply_prepayments_to_split, cross_settle_split
+from TripApp.services.exchange import get_exchange_rate
 from ..settlement.service import recalculate_settlements
 from TripApp.services.delta_builder import (
     build_expense_added_delta,
@@ -16,21 +17,11 @@ from TripApp.services.broadcast import broadcast_delta
 ZERO = Decimal("0.00")
 
 
-async def get_exchange_rate(from_currency: str, to_currency: str) -> Decimal:
-    """
-    Placeholder: returns 1:1 rate.
-    TODO: fetch real rate from external API
-    """
-    if from_currency.upper() == to_currency.upper():
-        return Decimal("1.000000")
-    return Decimal("1.000000")
-
-
 def _to_decimal(value: float) -> Decimal:
     return Decimal(str(value))
 
 
-def _is_settlement(payer_id: int, participant_id: int) -> bool:
+def _is_self_split(payer_id: int, participant_id: int) -> bool:
     return payer_id == participant_id
 
 
@@ -107,23 +98,24 @@ async def add_expense(request: HttpRequest, data: dict) -> dict:
         split_amount_cost, split_amount_trip = _compute_split_amounts(
             share, trip_currency, rate
         )
-        is_settled = _is_settlement(payer.participant_id, participant.participant_id)
+        is_self = _is_self_split(payer.participant_id, participant.participant_id)
 
         split = await sync_to_async(Split.objects.create)(
             participant=participant,
             expense=expense,
-            is_settlement=is_settled,
+            is_settlement=is_self,
             amount_in_cost_currency=split_amount_cost,
             amount_in_trip_currency=split_amount_trip,
-            left_to_settlement_amount_in_cost_currency=ZERO if is_settled else split_amount_cost,
-            left_to_settlement_amount_in_trip_currency=ZERO if is_settled else split_amount_trip,
+            left_to_settlement_amount_in_cost_currency=ZERO if is_self else split_amount_cost,
+            left_to_settlement_amount_in_trip_currency=ZERO if is_self else split_amount_trip,
         )
 
-        if not is_settled:
+        if not is_self:
             splits_to_reconcile.append(split)
 
     for split in splits_to_reconcile:
         await apply_prepayments_to_split(split, trip)
+        await cross_settle_split(split, trip)
 
     await recalculate_settlements(trip)
 
@@ -152,22 +144,27 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
 
     trip_currency = trip.default_currency.upper()
 
-    # Step 1: Collect old settlement amounts per participant
+    # Step 1: Collect old state
     old_splits = await sync_to_async(
         lambda: list(Split.objects.filter(expense=expense))
     )()
 
-    old_settled_cost: dict[int, Decimal] = {}
+    old_payer_id = await sync_to_async(lambda: expense.payer_id)()
+    old_expense_currency = expense.expense_currency.upper()
 
+    old_settled_cost: dict[int, Decimal] = {}
     for old_split in old_splits:
         pid = old_split.participant_id
+        # Skip payer's own split
+        if pid == old_payer_id:
+            continue
         settled_cost = old_split.amount_in_cost_currency - old_split.left_to_settlement_amount_in_cost_currency
         old_settled_cost[pid] = max(ZERO, settled_cost)
 
     # Step 2: Delete old splits
     await sync_to_async(Split.objects.filter(expense=expense).delete)()
 
-    # Update expense fields
+    # Step 3: Update expense fields
     expense_currency = data["currency"].strip().upper()
     rate = await get_exchange_rate(expense_currency, trip_currency)
 
@@ -189,7 +186,30 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
     expense.payer = new_payer
     await sync_to_async(expense.save)()
 
-    # Step 3 & 4: Create new splits with settlement awareness
+    payer_changed = (old_payer_id != new_payer.participant_id)
+
+    # Step 4: If payer changed, all old settled amounts become prepayments to OLD payer
+    if payer_changed:
+        old_payer = await sync_to_async(Participant.objects.get)(
+            participant_id=old_payer_id, trip=trip
+        )
+        for pid, settled_cost in old_settled_cost.items():
+            if settled_cost > ZERO:
+                participant = await sync_to_async(Participant.objects.get)(
+                    participant_id=pid, trip=trip
+                )
+                await sync_to_async(Prepayment.objects.create)(
+                    trip=trip,
+                    from_participant=participant,
+                    to_participant=old_payer,
+                    amount=settled_cost,
+                    amount_left=settled_cost,
+                    currency=old_expense_currency,
+                )
+        # Clear old_settled_cost so new splits start fresh
+        old_settled_cost = {}
+
+    # Step 5: Create new splits
     splits_to_reconcile = []
 
     for share in data["shared_with"]:
@@ -198,15 +218,16 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
         )
 
         new_cost, new_trip = _compute_split_amounts(share, trip_currency, rate)
-        is_settled = _is_settlement(new_payer.participant_id, participant.participant_id)
+        is_self = _is_self_split(new_payer.participant_id, participant.participant_id)
 
-        if is_settled:
+        if is_self:
             left_cost = ZERO
             left_trip = ZERO
         else:
             prev_settled_cost = old_settled_cost.get(participant.participant_id, ZERO)
 
             if prev_settled_cost > new_cost:
+                # Overpaid → create prepayment to NEW payer for the difference
                 overpaid_cost = prev_settled_cost - new_cost
                 await sync_to_async(Prepayment.objects.create)(
                     trip=trip,
@@ -215,6 +236,7 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
                     amount=overpaid_cost,
                     amount_left=overpaid_cost,
                     currency=expense_currency,
+                    rate=rate,
                 )
                 left_cost = ZERO
                 left_trip = ZERO
@@ -226,6 +248,8 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
                 else:
                     left_trip = ZERO
 
+        is_settled = is_self or (left_cost <= ZERO and left_trip <= ZERO)
+
         split = await sync_to_async(Split.objects.create)(
             participant=participant,
             expense=expense,
@@ -236,14 +260,15 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
             left_to_settlement_amount_in_trip_currency=left_trip,
         )
 
-        if not is_settled and left_cost > ZERO:
+        if not is_self and left_cost > ZERO:
             splits_to_reconcile.append(split)
 
-    # Step 5: Auto-reconcile
+    # Step 6: Auto-reconcile
     for split in splits_to_reconcile:
         await apply_prepayments_to_split(split, trip)
+        await cross_settle_split(split, trip)
 
-    # Step 6: Recalculate settlements
+    # Step 7: Recalculate settlements
     await recalculate_settlements(trip)
 
     # Broadcast delta
@@ -274,7 +299,8 @@ async def delete_expense(request: HttpRequest, trip_id: int, expense_id: int) ->
     )()
 
     for split in splits:
-        if split.is_settlement:
+        # Skip payer's own split — no debt exists
+        if split.participant_id == payer.participant_id:
             continue
 
         settled_cost = split.amount_in_cost_currency - split.left_to_settlement_amount_in_cost_currency
@@ -288,6 +314,7 @@ async def delete_expense(request: HttpRequest, trip_id: int, expense_id: int) ->
                 amount=settled_cost,
                 amount_left=settled_cost,
                 currency=expense_currency,
+                rate=expense.rate,
             )
 
     # Capture ID before deletion

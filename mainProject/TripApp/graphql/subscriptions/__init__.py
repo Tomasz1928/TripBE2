@@ -42,6 +42,7 @@ def _to_expense(e: dict) -> ExpenseDetailType:
                 participant_nickname=s["participant_nickname"],
                 split_value=_to_money_list(s["split_value"]),
                 is_settlement=s["is_settlement"],
+                left_for_settlement=_to_money_list(s["left_for_settlement"]),
             )
             for s in e["shared_with"]
         ],

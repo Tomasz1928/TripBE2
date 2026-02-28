@@ -44,7 +44,6 @@ class SettleByAmountPayload:
 @strawberry.input
 class SettleByCostsItem:
     expense_id: int
-    payer_id: int
     participant_id: int
 
 

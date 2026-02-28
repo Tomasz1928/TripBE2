@@ -46,6 +46,7 @@ class ShareType:
     participant_nickname: str
     split_value: List[SimpleMoneyValueType]
     is_settlement: bool
+    left_for_settlement: List[SimpleMoneyValueType]
 
 
 @strawberry.type

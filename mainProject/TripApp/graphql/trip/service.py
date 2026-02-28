@@ -41,6 +41,12 @@ async def get_trip_list(request: HttpRequest) -> list[dict]:
             ) or Decimal("0")
         )()
 
+        # Find owner's participant_id for this trip
+        owner_participant = await sync_to_async(
+            lambda t=trip: Participant.objects.filter(trip=t, user=t.trip_owner).first()
+        )()
+        owner_participant_id = owner_participant.participant_id if owner_participant else None
+
         trips.append({
             "id": trip.trip_id,
             "title": trip.title,
@@ -49,7 +55,8 @@ async def get_trip_list(request: HttpRequest) -> list[dict]:
             "currency": trip.default_currency,
             "description": trip.description,
             "total_expenses": float(total),
-            "im_owner": trip.trip_owner_id == user.id,
+            "owner_id": owner_participant_id,
+            "im_owner": p.user_id == trip.trip_owner_id,
         })
 
     return trips
@@ -78,6 +85,12 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
     all_participants = await sync_to_async(
         lambda: list(Participant.objects.filter(trip=trip).select_related("user"))
     )()
+
+    # Find owner's participant_id
+    owner_participant = next(
+        (p for p in all_participants if p.user_id == trip.trip_owner_id), None
+    )
+    owner_participant_id = owner_participant.participant_id if owner_participant else None
 
     all_expenses = await sync_to_async(
         lambda: list(
@@ -164,8 +177,8 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         "description": trip.description,
         "total_expenses": total_expenses,
         "categories": categories,
-        "owner_id": trip.trip_owner_id,
-        "im_owner": trip.trip_owner_id == user.id,
+        "owner_id": owner_participant_id,
+        "im_owner": owner_participant_id == my_id,
         "my_participant_id": my_id,
         "my_cost": my_cost,
         "expenses": expenses,
@@ -258,11 +271,23 @@ def _build_expenses(
                     "amount": float(split.amount_in_trip_currency),
                 }
             ]
+            left_for_settlement = [
+                {
+                    "is_main_currency": True,
+                    "currency": trip_currency,
+                    "amount": float(split.left_to_settlement_amount_in_trip_currency),
+                }
+            ]
             if expense_currency != trip_currency:
                 split_values.append({
                     "is_main_currency": False,
                     "currency": expense_currency,
                     "amount": float(split.amount_in_cost_currency),
+                })
+                left_for_settlement.append({
+                    "is_main_currency": False,
+                    "currency": expense_currency,
+                    "amount": float(split.left_to_settlement_amount_in_cost_currency),
                 })
 
             shared_with.append({
@@ -270,6 +295,7 @@ def _build_expenses(
                 "participant_nickname": p.nickname if p else "Unknown",
                 "split_value": split_values,
                 "is_settlement": split.is_settlement,
+                "left_for_settlement": left_for_settlement,
             })
 
         payer = participant_map.get(expense.payer_id)
@@ -425,43 +451,44 @@ def _build_single_relation(
 ) -> dict:
     other_p = participant_map.get(other_id)
 
-    # --- left_for_settled: from Settlement tables ---
-    # Positive = they owe me, Negative = I owe them
-    left_for_settled_trip = ZERO
-    left_for_settled_other: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    # --- left_for_settled ---
+    left_for_settled = []
 
+    # From SettlementTripCurrency → is_main_currency: true
+    left_trip = ZERO
     for s in trip_settlements:
         if s.from_participant_id == other_id and s.to_participant_id == my_id:
-            # Other owes me → positive
-            left_for_settled_trip += s.amount
+            left_trip += s.amount
         elif s.from_participant_id == my_id and s.to_participant_id == other_id:
-            # I owe other → negative
-            left_for_settled_trip -= s.amount
+            left_trip -= s.amount
 
+    left_for_settled.append({
+        "is_main_currency": True,
+        "currency": trip_currency,
+        "amount": float(left_trip),
+    })
+
+    # From SettlementOtherCurrency → is_main_currency: false
+    left_other: dict[str, Decimal] = defaultdict(lambda: ZERO)
     for s in other_settlements:
         if s.from_participant_id == other_id and s.to_participant_id == my_id:
-            left_for_settled_other[s.currency.upper()] += s.amount
+            left_other[s.currency.upper()] += s.amount
         elif s.from_participant_id == my_id and s.to_participant_id == other_id:
-            left_for_settled_other[s.currency.upper()] -= s.amount
+            left_other[s.currency.upper()] -= s.amount
 
-    left_for_settled = [
-        {
-            "is_main_currency": True,
-            "currency": trip_currency,
-            "amount": float(left_for_settled_trip),
-        }
-    ]
-    for curr, amt in left_for_settled_other.items():
-        if curr != trip_currency:
-            left_for_settled.append({
-                "is_main_currency": False,
-                "currency": curr,
-                "amount": float(amt),
-            })
+    for curr, amt in left_other.items():
+        left_for_settled.append({
+            "is_main_currency": False,
+            "currency": curr,
+            "amount": float(amt),
+        })
 
-    # --- all_related_amount: total splits between us (full amounts, not just remaining) ---
-    # Positive = they owe me (I paid, they have split), Negative = I owe them
+    # --- all_related_amount ---
+    all_related = []
+
+    # Trip currency total (all splits converted) → is_main_currency: true
     all_related_trip = ZERO
+    # Per original currency → is_main_currency: false
     all_related_other: dict[str, Decimal] = defaultdict(lambda: ZERO)
 
     for split in all_splits:
@@ -472,30 +499,29 @@ def _build_single_relation(
         expense_currency = split.expense.expense_currency.upper()
 
         if payer_id == my_id and participant_id == other_id:
-            # I paid, they owe me → positive
             all_related_trip += split.amount_in_trip_currency
-            if expense_currency != trip_currency:
+            if expense_currency == trip_currency:
+                all_related_other[trip_currency] += split.amount_in_trip_currency
+            else:
                 all_related_other[expense_currency] += split.amount_in_cost_currency
         elif payer_id == other_id and participant_id == my_id:
-            # They paid, I owe them → negative
             all_related_trip -= split.amount_in_trip_currency
-            if expense_currency != trip_currency:
+            if expense_currency == trip_currency:
+                all_related_other[trip_currency] -= split.amount_in_trip_currency
+            else:
                 all_related_other[expense_currency] -= split.amount_in_cost_currency
 
-    all_related_amount = [
-        {
-            "is_main_currency": True,
-            "currency": trip_currency,
-            "amount": float(all_related_trip),
-        }
-    ]
+    all_related.append({
+        "is_main_currency": True,
+        "currency": trip_currency,
+        "amount": float(all_related_trip),
+    })
     for curr, amt in all_related_other.items():
-        if curr != trip_currency:
-            all_related_amount.append({
-                "is_main_currency": False,
-                "currency": curr,
-                "amount": float(amt),
-            })
+        all_related.append({
+            "is_main_currency": False,
+            "currency": curr,
+            "amount": float(amt),
+        })
 
     # --- Prepayment details ---
     prepayment = _build_prepayment_details(
@@ -506,7 +532,7 @@ def _build_single_relation(
         "related_id": other_id,
         "related_name": other_p.nickname if other_p else "Unknown",
         "left_for_settled": left_for_settled,
-        "all_related_amount": all_related_amount,
+        "all_related_amount": all_related,
         "prepayment": prepayment,
     }
 
