@@ -4,12 +4,12 @@ from django.http import HttpRequest
 from asgiref.sync import sync_to_async
 from TripApp.models import Trip, Participant
 from TripApp.services.delta_builder import (
-    build_participant_added_delta,
-    build_participant_updated_delta,
-    build_participant_removed_delta,
+    build_participant_added_notification,
+    build_participant_updated_notification,
+    build_participant_removed_notification,
 )
 from TripApp.services.broadcast import broadcast_delta
-
+from TripApp.services.actor_resolver import get_actor_participant_id
 
 def _generate_access_code() -> str:
     """Generate code in format XXXX-XXXX where X is [A-Z0-9]."""
@@ -65,8 +65,9 @@ async def add_placeholder(request: HttpRequest, trip_id: int, nickname: str) -> 
     )
 
     # Broadcast delta
-    delta = await build_participant_added_delta(trip, participant)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    notification = await build_participant_added_notification(trip, actor_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Placeholder added."}
 
@@ -93,8 +94,9 @@ async def detach_user(request: HttpRequest, trip_id: int, participant_id: int) -
     await sync_to_async(participant.save)()
 
     # Broadcast delta
-    delta = await build_participant_updated_delta(trip, participant)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    notification = await build_participant_updated_notification(trip, actor_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "User detached. New access code generated."}
 
@@ -117,8 +119,9 @@ async def remove_placeholder(request: HttpRequest, trip_id: int, participant_id:
     await sync_to_async(participant.delete)()
 
     # Broadcast delta
-    delta = await build_participant_removed_delta(trip, removed_id)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    notification = await build_participant_removed_notification(trip, actor_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Placeholder removed."}
 
@@ -152,7 +155,7 @@ async def join_trip(request: HttpRequest, access_code: str) -> dict:
     await sync_to_async(participant.save)()
 
     # Broadcast delta
-    delta = await build_participant_updated_delta(trip, participant)
-    await broadcast_delta(trip.trip_id, delta)
+    notification = await build_participant_updated_notification(trip, participant.participant_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Joined trip successfully."}

@@ -4,7 +4,8 @@ from asgiref.sync import sync_to_async
 from TripApp.models import Trip, Participant, Prepayment
 from TripApp.services.reconciliation import apply_prepayment_to_splits
 from ..settlement.service import recalculate_settlements
-from TripApp.services.delta_builder import build_prepayment_delta
+from TripApp.services.delta_builder import build_prepayment_notification
+from TripApp.services.actor_resolver import get_actor_participant_id
 from TripApp.services.broadcast import broadcast_delta
 from ..expense.service import get_exchange_rate
 
@@ -93,7 +94,9 @@ async def add_prepayment(
     await recalculate_settlements(trip)
 
     # Broadcast delta
-    delta = await build_prepayment_delta(trip)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    target_id = other_participant.participant_id
+    notification = await build_prepayment_notification(trip, actor_id, target_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Prepayment added and reconciled."}

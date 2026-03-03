@@ -1,13 +1,5 @@
 import strawberry
 from enum import Enum
-from typing import Optional, List
-from ..trip.types import (
-    SimpleMoneyValueType,
-    CategoryType,
-    ExpenseDetailType,
-    ParticipantDetailType,
-    SettlementType,
-)
 
 
 @strawberry.enum
@@ -23,20 +15,9 @@ class TripEventType(Enum):
 
 
 @strawberry.type
-class TripDelta:
+class TripNotification:
     trip_id: int
+    trip_name: str
     event_type: TripEventType
-
-    # Upserts
-    expenses: Optional[List[ExpenseDetailType]] = None
-    participants: Optional[List[ParticipantDetailType]] = None
-    categories: Optional[List[CategoryType]] = None
-    settlement: Optional[SettlementType] = None
-
-    # Removes
-    removed_expense_ids: Optional[List[int]] = None
-    removed_participant_ids: Optional[List[int]] = None
-
-    # Scalars (always sent when anything changes)
-    total_expenses: Optional[float] = None
-    my_cost: Optional[List[SimpleMoneyValueType]] = None
+    actor_nickname: str
+    actor_participant_id: int

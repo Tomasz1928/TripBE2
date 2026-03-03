@@ -9,6 +9,10 @@ from collections import defaultdict
 from decimal import Decimal
 from django.http import HttpRequest
 from asgiref.sync import sync_to_async
+
+from TripApp.services.actor_resolver import get_actor_participant_id
+from TripApp.services.broadcast import broadcast_delta
+from TripApp.services.delta_builder import build_settlement_changed_notification
 from TripApp.services.exchange import get_exchange_rate
 from TripApp.models import (
     Trip, Split, Expense, Participant, Prepayment,
@@ -167,9 +171,6 @@ async def settle_by_amount(
     currency: str,
     is_main_currency: bool,
 ) -> dict:
-    from TripApp.services.delta_builder import build_settlement_changed_delta
-    from TripApp.services.broadcast import broadcast_delta
-
     currency = currency.strip().upper()
     amount_dec = Decimal(str(amount))
 
@@ -293,8 +294,14 @@ async def settle_by_amount(
     settled_amount = amount_dec - remaining
 
     # Broadcast delta
-    delta = await build_settlement_changed_delta(trip)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    if actor_id == from_participant.participant_id:
+        target_id = to_participant.participant_id
+    else:
+        target_id = from_participant.participant_id
+
+    notification = await build_settlement_changed_notification(trip, actor_id, target_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {
         "success": True,
@@ -314,8 +321,6 @@ async def settle_by_costs(
     trip_id: int,
     items: list[dict],
 ) -> dict:
-    from TripApp.services.delta_builder import build_settlement_changed_delta
-    from TripApp.services.broadcast import broadcast_delta
 
     if not items:
         return {"success": False, "message": "No items provided."}
@@ -376,8 +381,20 @@ async def settle_by_costs(
     await recalculate_settlements(trip)
 
     # Broadcast delta
-    delta = await build_settlement_changed_delta(trip)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    other_ids = set()
+    for item in items:
+        expense = await sync_to_async(Expense.objects.get)(expense_id=item["expense_id"], trip=trip)
+        payer_id = await sync_to_async(lambda: expense.payer_id)()
+        participant_id = item["participant_id"]
+        if actor_id == payer_id:
+            other_ids.add(participant_id)
+        else:
+            other_ids.add(payer_id)
+
+    for target_id in other_ids:
+        notification = await build_settlement_changed_notification(trip, actor_id, target_id)
+        await broadcast_delta(trip.trip_id, notification)
 
     return {
         "success": True,

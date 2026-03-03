@@ -155,20 +155,15 @@ type SimpleMoneyValueType {
 }
 
 type Subscription {
-  tripDelta(tripId: Int!): TripDelta!
+  tripUpdates(tripId: Int!): TripNotification!
 }
 
-type TripDelta {
+type TripNotification {
   tripId: Int!
+  tripName: String!
   eventType: TripEventType!
-  expenses: [ExpenseDetailType!]
-  participants: [ParticipantDetailType!]
-  categories: [CategoryType!]
-  settlement: SettlementType
-  removedExpenseIds: [Int!]
-  removedParticipantIds: [Int!]
-  totalExpenses: Float
-  myCost: [SimpleMoneyValueType!]
+  actorNickname: String!
+  actorParticipantId: Int!
 }
 
 type TripDetailType {

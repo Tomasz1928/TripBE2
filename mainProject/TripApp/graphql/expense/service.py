@@ -7,10 +7,11 @@ from TripApp.services.reconciliation import apply_prepayments_to_split, cross_se
 from TripApp.services.exchange import get_exchange_rate
 from ..settlement.service import recalculate_settlements
 from TripApp.services.delta_builder import (
-    build_expense_added_delta,
-    build_expense_updated_delta,
-    build_expense_deleted_delta,
+    build_expense_added_notification,
+    build_expense_updated_notification,
+    build_expense_deleted_notification,
 )
+from TripApp.services.actor_resolver import get_actor_participant_id
 from TripApp.services.broadcast import broadcast_delta
 
 
@@ -120,8 +121,9 @@ async def add_expense(request: HttpRequest, data: dict) -> dict:
     await recalculate_settlements(trip)
 
     # Broadcast delta
-    delta = await build_expense_added_delta(trip, expense)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    notification = await build_expense_added_notification(trip, actor_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Expense added successfully."}
 
@@ -272,8 +274,9 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
     await recalculate_settlements(trip)
 
     # Broadcast delta
-    delta = await build_expense_updated_delta(trip, expense)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    notification = await build_expense_updated_notification(trip, actor_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Expense updated successfully."}
 
@@ -324,7 +327,8 @@ async def delete_expense(request: HttpRequest, trip_id: int, expense_id: int) ->
     await recalculate_settlements(trip)
 
     # Broadcast delta
-    delta = await build_expense_deleted_delta(trip, deleted_expense_id)
-    await broadcast_delta(trip.trip_id, delta)
+    actor_id = await get_actor_participant_id(request, trip)
+    notification = await build_expense_deleted_notification(trip, actor_id)
+    await broadcast_delta(trip.trip_id, notification)
 
     return {"success": True, "message": "Expense deleted successfully."}
