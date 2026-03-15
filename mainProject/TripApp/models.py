@@ -105,6 +105,7 @@ class SettlementHistory(models.Model):
     class SettlementType(models.TextChoices):
         MANUAL_BY_AMOUNT = "MANUAL_BY_AMOUNT"
         MANUAL_BY_COSTS = "MANUAL_BY_COSTS"
+        MANUAL_BY_PREPAYMENT = "MANUAL_BY_PREPAYMENT"
         AUTO_PREPAYMENT = "AUTO_PREPAYMENT"
         AUTO_CROSS_SETTLE = "AUTO_CROSS_SETTLE"
 

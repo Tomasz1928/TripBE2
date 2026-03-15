@@ -46,3 +46,21 @@ class SettlementMutation:
             get_request(info), trip_id, items_dicts
         )
         return MutationPayload(success=result["success"], message=result["message"])
+
+    @strawberry.mutation
+    async def settle_by_prepayment(
+        self,
+        info: Info,
+        trip_id: int,
+        from_user_id: int,
+        to_user_id: int,
+        amount: float,
+        currency: str,
+        is_main_currency: bool,
+    ) -> MutationPayload:
+        result = await service.settle_by_prepayment(
+            get_request(info),
+            trip_id, from_user_id, to_user_id,
+            amount, currency, is_main_currency,
+        )
+        return MutationPayload(success=result["success"], message=result["message"])

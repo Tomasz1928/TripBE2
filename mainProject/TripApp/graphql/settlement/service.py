@@ -3,10 +3,12 @@ Settlement service:
   - recalculate_settlements: rebuild ParticipantRelation records for a trip
   - settle_by_amount: FIFO settlement (splits first, then prepayments), reads limits from ParticipantRelation
   - settle_by_costs: mark specific splits as fully settled
+  - settle_by_prepayment: settle only prepayments (reduce amount_left), reads limits from ParticipantRelation
 """
 
 from collections import defaultdict
 from decimal import Decimal
+from django.db import models
 from django.http import HttpRequest
 from asgiref.sync import sync_to_async
 
@@ -489,6 +491,223 @@ async def _load_settleable_prepayments(
             ).order_by("created_date")
         )
     )()
+
+
+# ---------------------------------------------------------------------------
+# Settle by prepayment
+# ---------------------------------------------------------------------------
+
+async def settle_by_prepayment(
+    request: HttpRequest,
+    trip_id: int,
+    from_user_id: int,
+    to_user_id: int,
+    amount: float,
+    currency: str,
+    is_main_currency: bool,
+) -> dict:
+    """
+    Settle only prepayments between two participants.
+    Reduces amount_left on prepayments (FIFO by created_date).
+    Does NOT touch splits.
+
+    from_user_id: the participant whose prepayment surplus is being settled
+    to_user_id: the participant who received the prepayment
+
+    DB query plan (excluding recalculate_settlements):
+      1. Trip.get                           — 1 SELECT
+      2. Participant.filter (all trip)       — 1 SELECT (from + to + caller in one query)
+      3. ParticipantRelation.filter          — 1 SELECT
+      4. Prepayment.filter                   — 1 SELECT
+      5. Prepayment.bulk_update              — 1 UPDATE (batch)
+      6. SettlementHistory.create            — 1 INSERT
+      Total: 6 queries + recalculate + broadcast
+    """
+    currency = currency.strip().upper()
+    amount_dec = Decimal(str(amount))
+
+    if amount_dec <= ZERO:
+        return {"success": False, "message": "Amount must be positive."}
+
+    if from_user_id == to_user_id:
+        return {"success": False, "message": "Cannot settle with yourself."}
+
+    # Query 1: Load trip
+    trip = await sync_to_async(Trip.objects.get)(trip_id=trip_id)
+    trip_currency = trip.default_currency.upper()
+
+    # Query 2: Load all relevant participants in one query
+    # (from, to, and caller — all from the same trip)
+    user = await sync_to_async(lambda: request.user)()
+    relevant_ids = {from_user_id, to_user_id}
+
+    trip_participants = await sync_to_async(
+        lambda: list(
+            Participant.objects.filter(trip=trip).filter(
+                models.Q(participant_id__in=relevant_ids) | models.Q(user=user)
+            )
+        )
+    )()
+
+    participant_map = {p.participant_id: p for p in trip_participants}
+    caller_participant = next((p for p in trip_participants if p.user_id == user.id), None)
+
+    from_participant = participant_map.get(from_user_id)
+    if not from_participant:
+        return {"success": False, "message": "From participant not found in this trip."}
+
+    to_participant = participant_map.get(to_user_id)
+    if not to_participant:
+        return {"success": False, "message": "To participant not found in this trip."}
+
+    if not caller_participant:
+        return {"success": False, "message": "You are not a participant in this trip."}
+
+    caller_id = caller_participant.participant_id
+    if caller_id not in (from_participant.participant_id, to_participant.participant_id):
+        return {"success": False, "message": "You can only settle prepayments you are involved in."}
+
+    # Query 3: Validate max settleable from ParticipantRelation prepayment_details
+    a_id, b_id = _ordered_pair(from_participant.participant_id, to_participant.participant_id)
+
+    relation = await sync_to_async(
+        lambda: ParticipantRelation.objects.filter(
+            trip=trip, participant_a_id=a_id, participant_b_id=b_id
+        ).first()
+    )()
+
+    if not relation:
+        return {"success": False, "message": "No prepayments found between these participants."}
+
+    max_settleable = _extract_max_prepayment_settleable(
+        relation.prepayment_details,
+        from_participant.participant_id,
+        a_id,
+        currency,
+        is_main_currency,
+        trip_currency,
+    )
+
+    if max_settleable <= ZERO:
+        return {"success": False, "message": "No prepayment balance to settle in this currency."}
+
+    settle_currency = trip_currency if is_main_currency else currency
+
+    if amount_dec > max_settleable:
+        return {
+            "success": False,
+            "message": f"Amount exceeds prepayment balance ({max_settleable} {settle_currency}).",
+        }
+
+    # Query 4: Load prepayments (FIFO by created_date)
+    prep_currency = trip_currency if is_main_currency else currency
+
+    prepayments = await sync_to_async(
+        lambda: list(
+            Prepayment.objects.filter(
+                trip=trip,
+                from_participant_id=from_participant.participant_id,
+                to_participant_id=to_participant.participant_id,
+                amount_left__gt=ZERO,
+                currency__iexact=prep_currency,
+            ).order_by("created_date")
+        )
+    )()
+
+    # Process in memory, collect modified prepayments for bulk_update
+    remaining = amount_dec
+    settled_total_settlement_curr = ZERO
+    settled_total_trip_curr = ZERO
+    modified_prepayments: list[Prepayment] = []
+
+    for prep in prepayments:
+        if remaining <= ZERO:
+            break
+
+        settleable = min(remaining, prep.amount_left)
+        prep.amount_left -= settleable
+        remaining -= settleable
+        modified_prepayments.append(prep)
+
+        settled_total_settlement_curr += settleable
+        prep_trip_amount = (settleable * prep.rate).quantize(Decimal("0.01"))
+        settled_total_trip_curr += prep_trip_amount
+
+    # Query 5: Batch update all modified prepayments in one UPDATE
+    if modified_prepayments:
+        await sync_to_async(
+            lambda: Prepayment.objects.bulk_update(modified_prepayments, ["amount_left"])
+        )()
+
+    # Query 6: Log history (single INSERT, no extra queries)
+    # actor_id = caller_id (already resolved, no need for get_actor_participant_id)
+    actor_id = caller_id
+
+    if settled_total_settlement_curr > ZERO:
+        await log_settlement(
+            trip=trip,
+            from_participant_id=from_participant.participant_id,
+            to_participant_id=to_participant.participant_id,
+            settlement_type=SettlementHistory.SettlementType.MANUAL_BY_PREPAYMENT,
+            amount_in_settlement_currency=settled_total_settlement_curr,
+            settlement_currency=settle_currency,
+            amount_in_trip_currency=settled_total_trip_curr,
+            related_expense_ids=[],
+            actor_participant_id=actor_id,
+        )
+
+    # Recalculate & broadcast
+    await recalculate_settlements(trip)
+
+    settled_amount = amount_dec - remaining
+
+    # Build notification directly (skip build_settlement_changed_notification
+    # to avoid its extra DB query — we already have the actor's nickname)
+    if actor_id == from_participant.participant_id:
+        target_id = to_participant.participant_id
+    else:
+        target_id = from_participant.participant_id
+
+    notification = {
+        "trip_id": trip.trip_id,
+        "trip_name": trip.title,
+        "event_type": "SETTLEMENT_CHANGED",
+        "actor_nickname": caller_participant.nickname,
+        "actor_participant_id": actor_id,
+        "target_participant_id": target_id,
+    }
+    await broadcast_delta(trip.trip_id, notification)
+
+    return {
+        "success": True,
+        "message": f"Prepayment settled {settled_amount} {settle_currency}.",
+    }
+
+
+def _extract_max_prepayment_settleable(
+    prepayment_details: dict,
+    from_id: int,
+    a_id: int,
+    currency: str,
+    is_main_currency: bool,
+    trip_currency: str,
+) -> Decimal:
+    amount_left_entries = prepayment_details.get("amount_left", [])
+
+    target_currency = trip_currency if is_main_currency else currency
+
+    for entry in amount_left_entries:
+        entry_currency = entry.get("currency", "").upper()
+        if entry_currency != target_currency:
+            continue
+
+        raw = Decimal(str(entry["amount"]))
+        if from_id == a_id:
+            return max(ZERO, raw)
+        else:
+            return max(ZERO, -raw)
+
+    return ZERO
 
 
 # ---------------------------------------------------------------------------
