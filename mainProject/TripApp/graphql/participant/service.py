@@ -36,8 +36,7 @@ async def _get_trip_and_verify_owner(request, trip_id: int) -> tuple:
     user = await sync_to_async(lambda: request.user)()
     trip = await sync_to_async(Trip.objects.get)(trip_id=trip_id)
 
-    owner_id = await sync_to_async(lambda: trip.trip_owner_id)()
-    if owner_id != user.id:
+    if trip.trip_owner_id != user.id:
         raise PermissionError("Only the trip owner can perform this action.")
 
     return trip, user
@@ -79,8 +78,7 @@ async def detach_user(request: HttpRequest, trip_id: int, participant_id: int) -
         participant_id=participant_id, trip=trip
     )
 
-    participant_user_id = await sync_to_async(lambda: participant.user_id)()
-    if participant_user_id == user.id:
+    if participant.user_id == user.id:
         return {"success": False, "message": "Cannot detach yourself from the trip."}
 
     if participant.is_placeholder:
@@ -108,14 +106,12 @@ async def remove_placeholder(request: HttpRequest, trip_id: int, participant_id:
         participant_id=participant_id, trip=trip
     )
 
-    participant_user_id = await sync_to_async(lambda: participant.user_id)()
-    if participant_user_id == user.id:
+    if participant.user_id == user.id:
         return {"success": False, "message": "Cannot remove yourself from the trip."}
 
     if not participant.is_placeholder:
         return {"success": False, "message": "Cannot remove an active participant. Detach the user first."}
 
-    removed_id = participant.participant_id
     await sync_to_async(participant.delete)()
 
     # Broadcast delta
@@ -141,7 +137,7 @@ async def join_trip(request: HttpRequest, access_code: str) -> dict:
     except Participant.DoesNotExist:
         return {"success": False, "message": "Invalid or already used access code."}
 
-    trip = await sync_to_async(lambda: participant.trip)()
+    trip = participant.trip
 
     already_in = await sync_to_async(
         Participant.objects.filter(trip=trip, user=user).exists

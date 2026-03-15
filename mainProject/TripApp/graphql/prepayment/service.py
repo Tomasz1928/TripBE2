@@ -7,7 +7,7 @@ from ..settlement.service import recalculate_settlements
 from TripApp.services.delta_builder import build_prepayment_notification
 from TripApp.services.actor_resolver import get_actor_participant_id
 from TripApp.services.broadcast import broadcast_delta
-from ..expense.service import get_exchange_rate
+from TripApp.services.exchange import get_exchange_rate
 
 VALID_DIRECTIONS = {"TO_ME", "FROM_ME"}
 
@@ -37,18 +37,26 @@ async def add_prepayment(
     trip_currency = trip.default_currency.upper()
 
     user = await sync_to_async(lambda: request.user)()
-    try:
-        my_participant = await sync_to_async(Participant.objects.get)(
-            trip=trip, user=user
-        )
-    except Participant.DoesNotExist:
+    relevant_participants = await sync_to_async(
+        lambda: {
+            p.participant_id: p
+            for p in Participant.objects.filter(
+                trip=trip,
+            ).filter()
+        }
+    )()
+
+    my_participant = None
+    for p in relevant_participants.values():
+        if p.user_id == user.id:
+            my_participant = p
+            break
+
+    if not my_participant:
         return {"success": False, "message": "You are not a participant in this trip."}
 
-    try:
-        other_participant = await sync_to_async(Participant.objects.get)(
-            participant_id=participant_id, trip=trip
-        )
-    except Participant.DoesNotExist:
+    other_participant = relevant_participants.get(participant_id)
+    if not other_participant:
         return {"success": False, "message": "Participant not found in this trip."}
 
     if my_participant.participant_id == other_participant.participant_id:
@@ -63,9 +71,7 @@ async def add_prepayment(
 
     if currency != trip_currency:
         has_expenses_in_currency = await sync_to_async(
-            lambda: Participant.objects.filter(
-                trip=trip
-            ).exists() and Trip.objects.filter(
+            lambda: Trip.objects.filter(
                 trip_id=trip_id,
                 expense__expense_currency__iexact=currency,
             ).exists()

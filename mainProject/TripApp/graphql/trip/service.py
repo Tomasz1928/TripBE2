@@ -5,6 +5,7 @@ Trip query service — builds TripListDto and TripDetailDto for the frontend.
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
+from django.db.models import Sum, Q
 from django.http import HttpRequest
 from asgiref.sync import sync_to_async
 from TripApp.models import (
@@ -30,20 +31,44 @@ async def get_trip_list(request: HttpRequest) -> list[dict]:
         )
     )()
 
+    if not participants:
+        return []
+
+    trip_ids = [p.trip.trip_id for p in participants]
+    expense_totals = await sync_to_async(
+        lambda: dict(
+            Expense.objects.filter(trip_id__in=trip_ids)
+            .values_list("trip_id")
+            .annotate(total=Sum("amount_in_trip_currency"))
+            .values_list("trip_id", "total")
+        )
+    )()
+    owner_participants = await sync_to_async(
+        lambda: {
+            p.trip_id: p
+            for p in Participant.objects.filter(
+                trip_id__in=trip_ids,
+                user_id__in=[p.trip.trip_owner_id for p in participants]
+            ).filter()
+        }
+    )()
+
+    trip_owner_map = {p.trip.trip_id: p.trip.trip_owner_id for p in participants}
+    owner_participants_list = await sync_to_async(
+        lambda: list(
+            Participant.objects.filter(trip_id__in=trip_ids, is_placeholder=False)
+            .only("participant_id", "trip_id", "user_id")
+        )
+    )()
+    owner_participant_map = {}
+    for op in owner_participants_list:
+        if op.user_id == trip_owner_map.get(op.trip_id):
+            owner_participant_map[op.trip_id] = op.participant_id
+
     trips = []
     for p in participants:
         trip = p.trip
-        total = await sync_to_async(
-            lambda t=trip: sum(
-                e.amount_in_trip_currency
-                for e in Expense.objects.filter(trip=t)
-            ) or Decimal("0")
-        )()
-
-        owner_participant = await sync_to_async(
-            lambda t=trip: Participant.objects.filter(trip=t, user=t.trip_owner).first()
-        )()
-        owner_participant_id = owner_participant.participant_id if owner_participant else None
+        total = expense_totals.get(trip.trip_id, Decimal("0"))
 
         trips.append({
             "id": trip.trip_id,
@@ -52,8 +77,8 @@ async def get_trip_list(request: HttpRequest) -> list[dict]:
             "date_end": trip.end_date.timestamp() * 1000,
             "currency": trip.default_currency,
             "description": trip.description,
-            "total_expenses": float(total),
-            "owner_id": owner_participant_id,
+            "total_expenses": float(total or 0),
+            "owner_id": owner_participant_map.get(trip.trip_id),
             "im_owner": p.user_id == trip.trip_owner_id,
         })
 
@@ -78,7 +103,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
 
     my_id = my_participant.participant_id
 
-    # --- Load all data upfront ---
+    # --- Load all data upfront (3 zapytania zamiast potencjalnie wielu) ---
     all_participants = await sync_to_async(
         lambda: list(Participant.objects.filter(trip=trip).select_related("user"))
     )()
@@ -133,7 +158,6 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
     expenses = _build_expenses(all_expenses, splits_by_expense, participant_map, trip_currency)
     participants = _build_participants(all_participants, all_splits, trip, trip_currency)
 
-    # --- Settlement (from ParticipantRelation) ---
     settlement = _build_settlement_from_relations(my_id, my_relations, participant_map)
 
     # --- Settlement History ---
@@ -141,7 +165,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         lambda: list(
             SettlementHistory.objects.filter(trip=trip).filter(
                 models_q_participant_a_or_b(my_id)
-            ).select_related("participant_a", "participant_b", "actor_participant")
+            ).select_related("actor_participant")
             .order_by("-created_at")
         )
     )()
@@ -169,7 +193,6 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
 
 def models_q_participant_a_or_b(participant_id: int):
     """Build Q filter for ParticipantRelation where participant is A or B."""
-    from django.db.models import Q
     return Q(participant_a_id=participant_id) | Q(participant_b_id=participant_id)
 
 
@@ -357,28 +380,18 @@ def _build_settlement_from_relations(
     my_relations: list,
     participant_map: dict,
 ) -> dict:
-    """
-    Build SettlementDto from precomputed ParticipantRelation records.
-
-    ParticipantRelation sign convention: positive = B owes A (where A.id < B.id).
-    We need to flip signs when presenting from my_id's perspective:
-      - "positive = other owes me" in the API response.
-    """
     relations = []
 
     for rel in my_relations:
         if rel.participant_a_id == my_id:
             other_id = rel.participant_b_id
-            # I am A. Convention: positive = B owes A = other owes me. No flip needed.
             sign = 1.0
         else:
             other_id = rel.participant_a_id
-            # I am B. Convention: positive = B owes A = I owe other. Flip sign.
             sign = -1.0
 
         other_p = participant_map.get(other_id)
 
-        # Flip signs in left_for_settled
         left_for_settled = [
             {
                 "is_main_currency": entry["is_main_currency"],
@@ -388,7 +401,6 @@ def _build_settlement_from_relations(
             for entry in rel.left_for_settled
         ]
 
-        # Flip signs in all_related_amount
         all_related_amount = [
             {
                 "is_main_currency": entry["is_main_currency"],
@@ -398,7 +410,6 @@ def _build_settlement_from_relations(
             for entry in rel.all_related_amount
         ]
 
-        # Flip signs in prepayment_details
         prepayment_details = rel.prepayment_details or {"amount_left": [], "history": []}
 
         amount_left = [
@@ -457,8 +468,6 @@ async def create_trip(
     if date_end <= date_start:
         return {"success": False, "message": "End date must be after start date."}
 
-    from datetime import datetime, timezone
-
     start_date = datetime.fromtimestamp(date_start / 1000, tz=timezone.utc)
     end_date = datetime.fromtimestamp(date_end / 1000, tz=timezone.utc)
 
@@ -493,16 +502,9 @@ def _build_settlement_history(
     history_records: list,
     participant_map: dict,
 ) -> list[dict]:
-    """
-    Build settlement history list from SettlementHistory records.
-
-    For each record, determine which participant is "the other" relative to my_id,
-    and present actor info.
-    """
     result = []
 
     for record in history_records:
-        # Determine other participant
         if record.participant_a_id == my_id:
             other_id = record.participant_b_id
         else:
@@ -510,7 +512,6 @@ def _build_settlement_history(
 
         other_p = participant_map.get(other_id)
 
-        # Actor info
         actor_id = None
         actor_nickname = None
         if record.actor_participant_id is not None:

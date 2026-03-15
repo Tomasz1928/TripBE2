@@ -29,8 +29,7 @@ def _is_self_split(payer_id: int, participant_id: int) -> bool:
 async def _verify_payer_is_caller(request: HttpRequest, expense: Expense) -> bool:
     """Check that the logged-in user is the payer of this expense."""
     user = await sync_to_async(lambda: request.user)()
-    payer = await sync_to_async(lambda: expense.payer)()
-    payer_user_id = await sync_to_async(lambda: payer.user_id)()
+    payer_user_id = expense.payer.user_id
     return payer_user_id == user.id
 
 
@@ -63,9 +62,18 @@ async def add_expense(request: HttpRequest, data: dict) -> dict:
     trip_id = data["trip_id"]
     trip = await sync_to_async(Trip.objects.select_related("trip_owner").get)(trip_id=trip_id)
 
-    payer = await sync_to_async(Participant.objects.get)(
-        participant_id=data["payer_id"], trip=trip
-    )
+    participant_ids = [s["participant_id"] for s in data["shared_with"]]
+    participant_ids.append(data["payer_id"])
+    participants = await sync_to_async(
+        lambda: {
+            p.participant_id: p
+            for p in Participant.objects.filter(
+                participant_id__in=participant_ids, trip=trip
+            )
+        }
+    )()
+
+    payer = participants[data["payer_id"]]
 
     expense_currency = data["currency"].strip().upper()
     trip_currency = trip.default_currency.upper()
@@ -89,19 +97,18 @@ async def add_expense(request: HttpRequest, data: dict) -> dict:
         created_at=created_at,
     )
 
-    splits_to_reconcile = []
+    splits_to_create = []
+    splits_needing_reconciliation_indices = []
 
-    for share in data["shared_with"]:
-        participant = await sync_to_async(Participant.objects.get)(
-            participant_id=share["participant_id"], trip=trip
-        )
+    for idx, share in enumerate(data["shared_with"]):
+        participant = participants[share["participant_id"]]
 
         split_amount_cost, split_amount_trip = _compute_split_amounts(
             share, trip_currency, rate
         )
         is_self = _is_self_split(payer.participant_id, participant.participant_id)
 
-        split = await sync_to_async(Split.objects.create)(
+        split = Split(
             participant=participant,
             expense=expense,
             is_settlement=is_self,
@@ -110,11 +117,16 @@ async def add_expense(request: HttpRequest, data: dict) -> dict:
             left_to_settlement_amount_in_cost_currency=ZERO if is_self else split_amount_cost,
             left_to_settlement_amount_in_trip_currency=ZERO if is_self else split_amount_trip,
         )
+        splits_to_create.append(split)
 
         if not is_self:
-            splits_to_reconcile.append(split)
+            splits_needing_reconciliation_indices.append(idx)
 
-    for split in splits_to_reconcile:
+    created_splits = await sync_to_async(
+        lambda: Split.objects.bulk_create(splits_to_create)
+    )()
+    for idx in splits_needing_reconciliation_indices:
+        split = created_splits[idx]
         await apply_prepayments_to_split(split, trip)
         await cross_settle_split(split, trip)
 
@@ -151,13 +163,12 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
         lambda: list(Split.objects.filter(expense=expense))
     )()
 
-    old_payer_id = await sync_to_async(lambda: expense.payer_id)()
+    old_payer_id = expense.payer_id
     old_expense_currency = expense.expense_currency.upper()
 
     old_settled_cost: dict[int, Decimal] = {}
     for old_split in old_splits:
         pid = old_split.participant_id
-        # Skip payer's own split
         if pid == old_payer_id:
             continue
         settled_cost = old_split.amount_in_cost_currency - old_split.left_to_settlement_amount_in_cost_currency
@@ -182,9 +193,20 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
     expense.rate = rate
     expense.created_at = datetime.fromtimestamp(data["date"] / 1000, tz=timezone.utc)
 
-    new_payer = await sync_to_async(Participant.objects.get)(
-        participant_id=data["payer_id"], trip=trip
-    )
+    participant_ids = [s["participant_id"] for s in data["shared_with"]]
+    participant_ids.append(data["payer_id"])
+    if old_payer_id not in participant_ids:
+        participant_ids.append(old_payer_id)
+    participants = await sync_to_async(
+        lambda: {
+            p.participant_id: p
+            for p in Participant.objects.filter(
+                participant_id__in=participant_ids, trip=trip
+            )
+        }
+    )()
+
+    new_payer = participants[data["payer_id"]]
     expense.payer = new_payer
     await sync_to_async(expense.save)()
 
@@ -192,32 +214,32 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
 
     # Step 4: If payer changed, all old settled amounts become prepayments to OLD payer
     if payer_changed:
-        old_payer = await sync_to_async(Participant.objects.get)(
-            participant_id=old_payer_id, trip=trip
-        )
+        old_payer = participants[old_payer_id]
+        prepayments_to_create = []
         for pid, settled_cost in old_settled_cost.items():
             if settled_cost > ZERO:
-                participant = await sync_to_async(Participant.objects.get)(
-                    participant_id=pid, trip=trip
-                )
-                await sync_to_async(Prepayment.objects.create)(
+                participant = participants[pid]
+                prepayments_to_create.append(Prepayment(
                     trip=trip,
                     from_participant=participant,
                     to_participant=old_payer,
                     amount=settled_cost,
                     amount_left=settled_cost,
                     currency=old_expense_currency,
-                )
-        # Clear old_settled_cost so new splits start fresh
+                ))
+        if prepayments_to_create:
+            await sync_to_async(
+                lambda: Prepayment.objects.bulk_create(prepayments_to_create)
+            )()
         old_settled_cost = {}
 
     # Step 5: Create new splits
-    splits_to_reconcile = []
+    splits_to_create = []
+    splits_needing_reconciliation_indices = []
+    overpaid_prepayments = []
 
-    for share in data["shared_with"]:
-        participant = await sync_to_async(Participant.objects.get)(
-            participant_id=share["participant_id"], trip=trip
-        )
+    for idx, share in enumerate(data["shared_with"]):
+        participant = participants[share["participant_id"]]
 
         new_cost, new_trip = _compute_split_amounts(share, trip_currency, rate)
         is_self = _is_self_split(new_payer.participant_id, participant.participant_id)
@@ -229,9 +251,8 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
             prev_settled_cost = old_settled_cost.get(participant.participant_id, ZERO)
 
             if prev_settled_cost > new_cost:
-                # Overpaid → create prepayment to NEW payer for the difference
                 overpaid_cost = prev_settled_cost - new_cost
-                await sync_to_async(Prepayment.objects.create)(
+                overpaid_prepayments.append(Prepayment(
                     trip=trip,
                     from_participant=participant,
                     to_participant=new_payer,
@@ -239,7 +260,7 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
                     amount_left=overpaid_cost,
                     currency=expense_currency,
                     rate=rate,
-                )
+                ))
                 left_cost = ZERO
                 left_trip = ZERO
             else:
@@ -252,7 +273,7 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
 
         is_settled = is_self or (left_cost <= ZERO and left_trip <= ZERO)
 
-        split = await sync_to_async(Split.objects.create)(
+        split = Split(
             participant=participant,
             expense=expense,
             is_settlement=is_settled,
@@ -261,12 +282,23 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
             left_to_settlement_amount_in_cost_currency=left_cost,
             left_to_settlement_amount_in_trip_currency=left_trip,
         )
+        splits_to_create.append(split)
 
         if not is_self and left_cost > ZERO:
-            splits_to_reconcile.append(split)
+            splits_needing_reconciliation_indices.append(idx)
+
+    if overpaid_prepayments:
+        await sync_to_async(
+            lambda: Prepayment.objects.bulk_create(overpaid_prepayments)
+        )()
+
+    created_splits = await sync_to_async(
+        lambda: Split.objects.bulk_create(splits_to_create)
+    )()
 
     # Step 6: Auto-reconcile
-    for split in splits_to_reconcile:
+    for idx in splits_needing_reconciliation_indices:
+        split = created_splits[idx]
         await apply_prepayments_to_split(split, trip)
         await cross_settle_split(split, trip)
 
@@ -295,33 +327,34 @@ async def delete_expense(request: HttpRequest, trip_id: int, expense_id: int) ->
         return {"success": False, "message": "Only the payer can delete this expense."}
 
     expense_currency = expense.expense_currency.upper()
-    payer = await sync_to_async(lambda: expense.payer)()
+    payer = expense.payer
 
     splits = await sync_to_async(
         lambda: list(Split.objects.filter(expense=expense).select_related("participant"))
     )()
 
+    prepayments_to_create = []
     for split in splits:
-        # Skip payer's own split — no debt exists
         if split.participant_id == payer.participant_id:
             continue
 
         settled_cost = split.amount_in_cost_currency - split.left_to_settlement_amount_in_cost_currency
 
         if settled_cost > ZERO:
-            participant = split.participant
-            await sync_to_async(Prepayment.objects.create)(
+            prepayments_to_create.append(Prepayment(
                 trip=trip,
-                from_participant=participant,
+                from_participant=split.participant,
                 to_participant=payer,
                 amount=settled_cost,
                 amount_left=settled_cost,
                 currency=expense_currency,
                 rate=expense.rate,
-            )
+            ))
 
-    # Capture ID before deletion
-    deleted_expense_id = expense.expense_id
+    if prepayments_to_create:
+        await sync_to_async(
+            lambda: Prepayment.objects.bulk_create(prepayments_to_create)
+        )()
 
     await sync_to_async(expense.delete)()
     await recalculate_settlements(trip)
