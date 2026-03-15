@@ -14,6 +14,7 @@ from .prepayment.mutations import PrepaymentMutation
 from .settlement.queries import SettlementQuery
 from .settlement.mutations import SettlementMutation
 from .subscriptions import Subscription
+from .currency.queries import CurrencyQuery
 
 Query = merge_types(
     "Query",
@@ -21,6 +22,7 @@ Query = merge_types(
         AuthQuery,
         TripQuery,
         SettlementQuery,
+        CurrencyQuery
     ),
 )
 
