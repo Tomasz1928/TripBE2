@@ -11,6 +11,7 @@ from decimal import Decimal
 from asgiref.sync import sync_to_async
 from TripApp.models import Prepayment, Split, Expense, Trip, SettlementHistory
 from TripApp.services.settlement_history import log_settlement
+from TripApp.services.breakdown import append_breakdown
 
 
 ZERO = Decimal("0.00")
@@ -62,6 +63,8 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
         prep_currency = prepayment.currency.upper()
         settled_cost = ZERO
         settled_trip = ZERO
+        breakdown_cost = ZERO
+        breakdown_trip = ZERO
 
         if prep_currency == trip_currency:
             settleable_trip = _min_positive(
@@ -84,6 +87,8 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
 
             settled_cost = settleable_trip  # in trip currency
             settled_trip = settleable_trip
+            breakdown_cost = settleable_cost
+            breakdown_trip = settleable_trip
 
         elif prep_currency == expense_currency and expense_currency != trip_currency:
             settleable_cost = _min_positive(
@@ -102,9 +107,14 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
 
             settled_cost = settleable_cost
             settled_trip = settleable_trip
+            breakdown_cost = settleable_cost
+            breakdown_trip = settleable_trip
 
         else:
             continue
+
+        # Append breakdown entry
+        append_breakdown(split, "AUTO_PREPAYMENT", breakdown_cost, breakdown_trip)
 
         await sync_to_async(prepayment.save)()
 
@@ -163,6 +173,8 @@ async def apply_prepayment_to_splits(prepayment: Prepayment, trip: Trip) -> None
         rate = expense.rate
         settled_cost = ZERO
         settled_trip = ZERO
+        breakdown_cost = ZERO
+        breakdown_trip = ZERO
 
         if prep_currency == trip_currency:
             settleable_trip = _min_positive(
@@ -185,6 +197,8 @@ async def apply_prepayment_to_splits(prepayment: Prepayment, trip: Trip) -> None
 
             settled_cost = settleable_trip
             settled_trip = settleable_trip
+            breakdown_cost = settleable_cost
+            breakdown_trip = settleable_trip
 
         else:
             settleable_cost = _min_positive(
@@ -203,6 +217,11 @@ async def apply_prepayment_to_splits(prepayment: Prepayment, trip: Trip) -> None
 
             settled_cost = settleable_cost
             settled_trip = settleable_trip
+            breakdown_cost = settleable_cost
+            breakdown_trip = settleable_trip
+
+        # Append breakdown entry
+        append_breakdown(split, "AUTO_PREPAYMENT", breakdown_cost, breakdown_trip)
 
         _update_is_settlement(split)
         await sync_to_async(split.save)()
@@ -263,6 +282,12 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
         opposing_rate = opposing_expense.rate
         settled_cost = ZERO
         settled_trip = ZERO
+        # Breakdown amounts for new split
+        new_breakdown_cost = ZERO
+        new_breakdown_trip = ZERO
+        # Breakdown amounts for opposing split
+        opp_breakdown_cost = ZERO
+        opp_breakdown_trip = ZERO
 
         if expense_currency == trip_currency:
             settleable_trip = _min_positive(
@@ -292,6 +317,10 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
 
             settled_cost = settleable_trip
             settled_trip = settleable_trip
+            new_breakdown_cost = settleable_new_cost
+            new_breakdown_trip = settleable_trip
+            opp_breakdown_cost = settleable_opp_cost
+            opp_breakdown_trip = settleable_trip
 
         else:
             settleable_cost = _min_positive(
@@ -315,6 +344,14 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
 
             settled_cost = settleable_cost
             settled_trip = settleable_new_trip
+            new_breakdown_cost = settleable_cost
+            new_breakdown_trip = settleable_new_trip
+            opp_breakdown_cost = settleable_cost
+            opp_breakdown_trip = settleable_opp_trip
+
+        # Append breakdown to both splits
+        append_breakdown(split, "AUTO_CROSS_SETTLE", new_breakdown_cost, new_breakdown_trip)
+        append_breakdown(opposing, "AUTO_CROSS_SETTLE", opp_breakdown_cost, opp_breakdown_trip)
 
         _update_is_settlement(opposing)
         await sync_to_async(opposing.save)()

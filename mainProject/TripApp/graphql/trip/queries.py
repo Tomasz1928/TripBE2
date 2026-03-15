@@ -7,6 +7,7 @@ from .types import (
     ParticipantDetailType, SettlementType, SettlementRelationType,
     PrepaymentDetailsType, PrepaymentHistoryType,
     SettlementHistoryType, SettlementHistoryEventType,
+    SettlementBreakdownEntryType, SettlementBreakdownType,
 )
 from ..utils import get_request
 from . import service
@@ -22,6 +23,18 @@ def _to_money(d: dict) -> SimpleMoneyValueType:
 
 def _to_money_list(lst: list[dict]) -> list[SimpleMoneyValueType]:
     return [_to_money(d) for d in lst]
+
+
+def _to_breakdown_entry(d: dict) -> SettlementBreakdownEntryType:
+    return SettlementBreakdownEntryType(
+        type=SettlementBreakdownType(d["type"]),
+        amount_cost=d["amount_cost"],
+        amount_trip=d["amount_trip"],
+    )
+
+
+def _to_breakdown_list(lst: list[dict]) -> list[SettlementBreakdownEntryType]:
+    return [_to_breakdown_entry(d) for d in lst]
 
 
 @strawberry.type
@@ -79,6 +92,7 @@ class TripQuery:
                         split_value=_to_money_list(s["split_value"]),
                         is_settlement=s["is_settlement"],
                         left_for_settlement=_to_money_list(s["left_for_settlement"]),
+                        settlement_breakdown=_to_breakdown_list(s["settlement_breakdown"]),
                     )
                     for s in e["shared_with"]
                 ],

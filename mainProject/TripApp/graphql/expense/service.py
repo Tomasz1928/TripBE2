@@ -5,6 +5,7 @@ from asgiref.sync import sync_to_async
 from TripApp.models import Trip, Participant, Expense, Split, Prepayment
 from TripApp.services.reconciliation import apply_prepayments_to_split, cross_settle_split
 from TripApp.services.exchange import get_exchange_rate
+from TripApp.services.breakdown import set_self_breakdown
 from ..settlement.service import recalculate_settlements
 from TripApp.services.delta_builder import (
     build_expense_added_notification,
@@ -116,7 +117,13 @@ async def add_expense(request: HttpRequest, data: dict) -> dict:
             amount_in_trip_currency=split_amount_trip,
             left_to_settlement_amount_in_cost_currency=ZERO if is_self else split_amount_cost,
             left_to_settlement_amount_in_trip_currency=ZERO if is_self else split_amount_trip,
+            settlement_breakdown=[],
         )
+
+        # Set SELF breakdown for payer's own split
+        if is_self:
+            set_self_breakdown(split)
+
         splits_to_create.append(split)
 
         if not is_self:
@@ -167,12 +174,18 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
     old_expense_currency = expense.expense_currency.upper()
 
     old_settled_cost: dict[int, Decimal] = {}
+    old_breakdown: dict[int, list] = {}
     for old_split in old_splits:
         pid = old_split.participant_id
         if pid == old_payer_id:
             continue
         settled_cost = old_split.amount_in_cost_currency - old_split.left_to_settlement_amount_in_cost_currency
         old_settled_cost[pid] = max(ZERO, settled_cost)
+        # Preserve breakdown from old split (excluding UNSETTLED which is computed)
+        old_breakdown[pid] = [
+            entry for entry in (old_split.settlement_breakdown or [])
+            if entry.get("type") != "UNSETTLED"
+        ]
 
     # Step 2: Delete old splits
     await sync_to_async(Split.objects.filter(expense=expense).delete)()
@@ -232,6 +245,7 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
                 lambda: Prepayment.objects.bulk_create(prepayments_to_create)
             )()
         old_settled_cost = {}
+        old_breakdown = {}  # Reset breakdown when payer changes
 
     # Step 5: Create new splits
     splits_to_create = []
@@ -273,6 +287,36 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
 
         is_settled = is_self or (left_cost <= ZERO and left_trip <= ZERO)
 
+        # Build breakdown for new split
+        if is_self:
+            breakdown = [{
+                "type": "SELF",
+                "amount_cost": float(new_cost),
+                "amount_trip": float(new_trip),
+            }]
+        elif not payer_changed and participant.participant_id in old_breakdown:
+            # Preserve old breakdown, but cap total to new_cost
+            prev_breakdown = old_breakdown[participant.participant_id]
+            total_prev = sum(Decimal(str(e["amount_cost"])) for e in prev_breakdown)
+            if total_prev <= new_cost:
+                breakdown = prev_breakdown
+            else:
+                # Scale down proportionally
+                if total_prev > ZERO:
+                    scale = new_cost / total_prev
+                    breakdown = [
+                        {
+                            "type": e["type"],
+                            "amount_cost": float((Decimal(str(e["amount_cost"])) * scale).quantize(Decimal("0.01"))),
+                            "amount_trip": float((Decimal(str(e["amount_trip"])) * scale).quantize(Decimal("0.01"))),
+                        }
+                        for e in prev_breakdown
+                    ]
+                else:
+                    breakdown = []
+        else:
+            breakdown = []
+
         split = Split(
             participant=participant,
             expense=expense,
@@ -281,6 +325,7 @@ async def update_expense(request: HttpRequest, data: dict) -> dict:
             amount_in_trip_currency=new_trip,
             left_to_settlement_amount_in_cost_currency=left_cost,
             left_to_settlement_amount_in_trip_currency=left_trip,
+            settlement_breakdown=breakdown,
         )
         splits_to_create.append(split)
 

@@ -58,6 +58,7 @@ class Split(models.Model):
     amount_in_trip_currency = models.DecimalField(max_digits=10, decimal_places=2)
     left_to_settlement_amount_in_cost_currency = models.DecimalField(max_digits=10, decimal_places=2)
     left_to_settlement_amount_in_trip_currency = models.DecimalField(max_digits=10, decimal_places=2)
+    settlement_breakdown = models.JSONField(default=list)
 
 
 class Prepayment(models.Model):

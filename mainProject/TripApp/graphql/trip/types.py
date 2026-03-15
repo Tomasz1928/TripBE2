@@ -12,6 +12,25 @@ class SimpleMoneyValueType:
     amount: float
 
 
+# --- Settlement Breakdown (per split) ---
+
+@strawberry.enum
+class SettlementBreakdownType(Enum):
+    SELF = "SELF"
+    MANUAL_BY_AMOUNT = "MANUAL_BY_AMOUNT"
+    MANUAL_BY_COSTS = "MANUAL_BY_COSTS"
+    AUTO_PREPAYMENT = "AUTO_PREPAYMENT"
+    AUTO_CROSS_SETTLE = "AUTO_CROSS_SETTLE"
+    UNSETTLED = "UNSETTLED"
+
+
+@strawberry.type
+class SettlementBreakdownEntryType:
+    type: SettlementBreakdownType
+    amount_cost: float
+    amount_trip: float
+
+
 # --- Trip List (lightweight) ---
 
 @strawberry.type
@@ -48,6 +67,7 @@ class ShareType:
     split_value: List[SimpleMoneyValueType]
     is_settlement: bool
     left_for_settlement: List[SimpleMoneyValueType]
+    settlement_breakdown: List[SettlementBreakdownEntryType]
 
 
 @strawberry.type

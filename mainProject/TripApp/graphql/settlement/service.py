@@ -16,6 +16,7 @@ from TripApp.services.actor_resolver import get_actor_participant_id
 from TripApp.services.broadcast import broadcast_delta
 from TripApp.services.delta_builder import build_settlement_changed_notification
 from TripApp.services.settlement_history import log_settlement
+from TripApp.services.breakdown import append_breakdown
 from TripApp.models import (
     Trip, Split, Expense, Participant, Prepayment, ParticipantRelation,
     SettlementHistory,
@@ -310,6 +311,9 @@ async def settle_by_amount(
         expense = split.expense
         rate = expense.rate
 
+        breakdown_cost = ZERO
+        breakdown_trip = ZERO
+
         if is_main_currency:
             left = split.left_to_settlement_amount_in_trip_currency
             settleable_trip = min(remaining, left)
@@ -329,6 +333,8 @@ async def settle_by_amount(
 
             settled_from_splits_settlement_curr += settleable_trip
             settled_from_splits_trip_curr += settleable_trip
+            breakdown_cost = settleable_cost
+            breakdown_trip = settleable_trip
         else:
             left = split.left_to_settlement_amount_in_cost_currency
             settleable_cost = min(remaining, left)
@@ -344,6 +350,11 @@ async def settle_by_amount(
 
             settled_from_splits_settlement_curr += settleable_cost
             settled_from_splits_trip_curr += settleable_trip
+            breakdown_cost = settleable_cost
+            breakdown_trip = settleable_trip
+
+        # Append breakdown entry
+        append_breakdown(split, "MANUAL_BY_AMOUNT", breakdown_cost, breakdown_trip)
 
         split.is_settlement = (
             split.left_to_settlement_amount_in_trip_currency <= ZERO
@@ -509,19 +520,7 @@ async def settle_by_prepayment(
     """
     Settle only prepayments between two participants.
     Reduces amount_left on prepayments (FIFO by created_date).
-    Does NOT touch splits.
-
-    from_user_id: the participant whose prepayment surplus is being settled
-    to_user_id: the participant who received the prepayment
-
-    DB query plan (excluding recalculate_settlements):
-      1. Trip.get                           — 1 SELECT
-      2. Participant.filter (all trip)       — 1 SELECT (from + to + caller in one query)
-      3. ParticipantRelation.filter          — 1 SELECT
-      4. Prepayment.filter                   — 1 SELECT
-      5. Prepayment.bulk_update              — 1 UPDATE (batch)
-      6. SettlementHistory.create            — 1 INSERT
-      Total: 6 queries + recalculate + broadcast
+    Does NOT touch splits — so no breakdown changes here.
     """
     currency = currency.strip().upper()
     amount_dec = Decimal(str(amount))
@@ -537,7 +536,6 @@ async def settle_by_prepayment(
     trip_currency = trip.default_currency.upper()
 
     # Query 2: Load all relevant participants in one query
-    # (from, to, and caller — all from the same trip)
     user = await sync_to_async(lambda: request.user)()
     relevant_ids = {from_user_id, to_user_id}
 
@@ -639,8 +637,7 @@ async def settle_by_prepayment(
             lambda: Prepayment.objects.bulk_update(modified_prepayments, ["amount_left"])
         )()
 
-    # Query 6: Log history (single INSERT, no extra queries)
-    # actor_id = caller_id (already resolved, no need for get_actor_participant_id)
+    # Query 6: Log history
     actor_id = caller_id
 
     if settled_total_settlement_curr > ZERO:
@@ -661,8 +658,6 @@ async def settle_by_prepayment(
 
     settled_amount = amount_dec - remaining
 
-    # Build notification directly (skip build_settlement_changed_notification
-    # to avoid its extra DB query — we already have the actor's nickname)
     if actor_id == from_participant.participant_id:
         target_id = to_participant.participant_id
     else:
@@ -789,6 +784,10 @@ async def settle_by_costs(
         settled_cost = split.left_to_settlement_amount_in_cost_currency
         settled_trip = split.left_to_settlement_amount_in_trip_currency
         expense_currency = expense.expense_currency.upper()
+
+        # Append breakdown entry for the remaining amount being settled
+        if settled_cost > ZERO or settled_trip > ZERO:
+            append_breakdown(split, "MANUAL_BY_COSTS", settled_cost, settled_trip)
 
         split.left_to_settlement_amount_in_cost_currency = ZERO
         split.left_to_settlement_amount_in_trip_currency = ZERO

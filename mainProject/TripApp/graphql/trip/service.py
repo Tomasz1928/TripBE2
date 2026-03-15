@@ -12,6 +12,7 @@ from TripApp.models import (
     Trip, Participant, Expense, Split, Prepayment, ParticipantRelation,
     SettlementHistory,
 )
+from TripApp.services.breakdown import get_full_breakdown
 
 ZERO = Decimal("0.00")
 
@@ -103,7 +104,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
 
     my_id = my_participant.participant_id
 
-    # --- Load all data upfront (3 zapytania zamiast potencjalnie wielu) ---
+    # --- Load all data upfront ---
     all_participants = await sync_to_async(
         lambda: list(Participant.objects.filter(trip=trip).select_related("user"))
     )()
@@ -291,12 +292,16 @@ def _build_expenses(
                     "amount": float(split.left_to_settlement_amount_in_cost_currency),
                 })
 
+            # Settlement breakdown — read from JSON field, compute UNSETTLED
+            breakdown = get_full_breakdown(split)
+
             shared_with.append({
                 "participant_id": split.participant_id,
                 "participant_nickname": p.nickname if p else "Unknown",
                 "split_value": split_values,
                 "is_settlement": split.is_settlement,
                 "left_for_settlement": left_for_settlement,
+                "settlement_breakdown": breakdown,
             })
 
         payer = participant_map.get(expense.payer_id)
