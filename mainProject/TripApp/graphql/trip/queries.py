@@ -6,6 +6,7 @@ from .types import (
     CategoryType, ExpenseDetailType, ShareType,
     ParticipantDetailType, SettlementType, SettlementRelationType,
     PrepaymentDetailsType, PrepaymentHistoryType,
+    SettlementHistoryType, SettlementHistoryEventType,
 )
 from ..utils import get_request
 from . import service
@@ -125,6 +126,24 @@ class TripQuery:
                 ]
             )
 
+        # Settlement History
+        settlement_history = [
+            SettlementHistoryType(
+                id=h["id"],
+                settlement_type=SettlementHistoryEventType(h["settlement_type"]),
+                actor_participant_id=h["actor_participant_id"],
+                actor_nickname=h["actor_nickname"],
+                other_participant_id=h["other_participant_id"],
+                other_nickname=h["other_nickname"],
+                amount_in_settlement_currency=h["amount_in_settlement_currency"],
+                settlement_currency=h["settlement_currency"],
+                amount_in_trip_currency=h["amount_in_trip_currency"],
+                related_expense_ids=h["related_expense_ids"],
+                created_at=h["created_at"],
+            )
+            for h in data.get("settlement_history", [])
+        ]
+
         return TripDetailType(
             id=data["id"],
             title=data["title"],
@@ -141,4 +160,5 @@ class TripQuery:
             expenses=expenses,
             participants=participants,
             settlement=settlement,
+            settlement_history=settlement_history,
         )

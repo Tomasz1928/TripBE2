@@ -1,5 +1,6 @@
 import strawberry
 from typing import Optional, List
+from enum import Enum
 
 
 # --- Shared ---
@@ -105,6 +106,31 @@ class SettlementType:
     relations: List[SettlementRelationType]
 
 
+# --- Settlement History ---
+
+@strawberry.enum
+class SettlementHistoryEventType(Enum):
+    MANUAL_BY_AMOUNT = "MANUAL_BY_AMOUNT"
+    MANUAL_BY_COSTS = "MANUAL_BY_COSTS"
+    AUTO_PREPAYMENT = "AUTO_PREPAYMENT"
+    AUTO_CROSS_SETTLE = "AUTO_CROSS_SETTLE"
+
+
+@strawberry.type
+class SettlementHistoryType:
+    id: int
+    settlement_type: SettlementHistoryEventType
+    actor_participant_id: Optional[int]
+    actor_nickname: Optional[str]
+    other_participant_id: int
+    other_nickname: str
+    amount_in_settlement_currency: float
+    settlement_currency: str
+    amount_in_trip_currency: float
+    related_expense_ids: List[int]
+    created_at: float  # timestamp ms
+
+
 # --- Trip Details (full) ---
 
 @strawberry.type
@@ -124,6 +150,7 @@ class TripDetailType:
     expenses: List[ExpenseDetailType]
     participants: List[ParticipantDetailType]
     settlement: Optional[SettlementType]
+    settlement_history: List[SettlementHistoryType]
 
 
 # --- Payloads ---

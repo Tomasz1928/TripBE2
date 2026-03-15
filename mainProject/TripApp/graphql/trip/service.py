@@ -9,6 +9,7 @@ from django.http import HttpRequest
 from asgiref.sync import sync_to_async
 from TripApp.models import (
     Trip, Participant, Expense, Split, Prepayment, ParticipantRelation,
+    SettlementHistory,
 )
 
 ZERO = Decimal("0.00")
@@ -135,6 +136,17 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
     # --- Settlement (from ParticipantRelation) ---
     settlement = _build_settlement_from_relations(my_id, my_relations, participant_map)
 
+    # --- Settlement History ---
+    my_history = await sync_to_async(
+        lambda: list(
+            SettlementHistory.objects.filter(trip=trip).filter(
+                models_q_participant_a_or_b(my_id)
+            ).select_related("participant_a", "participant_b", "actor_participant")
+            .order_by("-created_at")
+        )
+    )()
+    settlement_history = _build_settlement_history(my_id, my_history, participant_map)
+
     return {
         "id": trip.trip_id,
         "title": trip.title,
@@ -151,6 +163,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         "expenses": expenses,
         "participants": participants,
         "settlement": settlement,
+        "settlement_history": settlement_history,
     }
 
 
@@ -469,3 +482,54 @@ async def create_trip(
     )
 
     return {"success": True, "message": "Trip created successfully.", "trip": trip}
+
+
+# ---------------------------------------------------------------------------
+# Helper: build settlement history (from my perspective)
+# ---------------------------------------------------------------------------
+
+def _build_settlement_history(
+    my_id: int,
+    history_records: list,
+    participant_map: dict,
+) -> list[dict]:
+    """
+    Build settlement history list from SettlementHistory records.
+
+    For each record, determine which participant is "the other" relative to my_id,
+    and present actor info.
+    """
+    result = []
+
+    for record in history_records:
+        # Determine other participant
+        if record.participant_a_id == my_id:
+            other_id = record.participant_b_id
+        else:
+            other_id = record.participant_a_id
+
+        other_p = participant_map.get(other_id)
+
+        # Actor info
+        actor_id = None
+        actor_nickname = None
+        if record.actor_participant_id is not None:
+            actor_id = record.actor_participant_id
+            actor_p = participant_map.get(actor_id)
+            actor_nickname = actor_p.nickname if actor_p else "Unknown"
+
+        result.append({
+            "id": record.id,
+            "settlement_type": record.settlement_type,
+            "actor_participant_id": actor_id,
+            "actor_nickname": actor_nickname,
+            "other_participant_id": other_id,
+            "other_nickname": other_p.nickname if other_p else "Unknown",
+            "amount_in_settlement_currency": float(record.amount_in_settlement_currency),
+            "settlement_currency": record.settlement_currency,
+            "amount_in_trip_currency": float(record.amount_in_trip_currency),
+            "related_expense_ids": record.related_expenses or [],
+            "created_at": record.created_at.timestamp() * 1000,
+        })
+
+    return result

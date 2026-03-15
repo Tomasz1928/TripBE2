@@ -72,6 +72,14 @@ class Prepayment(models.Model):
 
 
 class ParticipantRelation(models.Model):
+    """
+    Precomputed settlement summary for a pair of participants.
+
+    Convention: participant_a.id < participant_b.id (always).
+    Sign convention in JSON fields: positive = B owes A, negative = A owes B.
+
+    Rebuilt from scratch by recalculate_settlements() after every mutation.
+    """
     trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name="participant_relations")
     participant_a = models.ForeignKey(
         Participant, on_delete=models.CASCADE, related_name="relations_as_a"
@@ -91,3 +99,31 @@ class ParticipantRelation(models.Model):
                 name="unique_relation_per_trip"
             ),
         ]
+
+
+class SettlementHistory(models.Model):
+    class SettlementType(models.TextChoices):
+        MANUAL_BY_AMOUNT = "MANUAL_BY_AMOUNT"
+        MANUAL_BY_COSTS = "MANUAL_BY_COSTS"
+        AUTO_PREPAYMENT = "AUTO_PREPAYMENT"
+        AUTO_CROSS_SETTLE = "AUTO_CROSS_SETTLE"
+
+    trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name="settlement_history")
+    participant_a = models.ForeignKey(
+        Participant, on_delete=models.CASCADE, related_name="settlement_history_as_a"
+    )
+    participant_b = models.ForeignKey(
+        Participant, on_delete=models.CASCADE, related_name="settlement_history_as_b"
+    )
+    settlement_type = models.CharField(max_length=20, choices=SettlementType.choices)
+
+    actor_participant = models.ForeignKey(
+        Participant, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="settlement_actions"
+    )
+
+    amount_in_settlement_currency = models.DecimalField(max_digits=10, decimal_places=2)
+    settlement_currency = models.CharField(max_length=5)
+    amount_in_trip_currency = models.DecimalField(max_digits=10, decimal_places=2)
+    related_expenses = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)

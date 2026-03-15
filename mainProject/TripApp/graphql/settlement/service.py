@@ -14,8 +14,10 @@ from TripApp.services.actor_resolver import get_actor_participant_id
 from TripApp.services.broadcast import broadcast_delta
 from TripApp.services.delta_builder import build_settlement_changed_notification
 from TripApp.services.exchange import get_exchange_rate
+from TripApp.services.settlement_history import log_settlement
 from TripApp.models import (
     Trip, Split, Expense, Participant, Prepayment, ParticipantRelation,
+    SettlementHistory,
 )
 
 ZERO = Decimal("0.00")
@@ -333,6 +335,9 @@ async def settle_by_amount(
     )
 
     remaining = amount_dec
+    settled_expense_ids: list[int] = []
+    settled_from_splits_settlement_curr = ZERO
+    settled_from_splits_trip_curr = ZERO
 
     for split in splits:
         if remaining <= ZERO:
@@ -357,6 +362,9 @@ async def settle_by_amount(
                 ZERO,
                 split.left_to_settlement_amount_in_cost_currency - settleable_cost,
             )
+
+            settled_from_splits_settlement_curr += settleable_trip
+            settled_from_splits_trip_curr += settleable_trip
         else:
             left = split.left_to_settlement_amount_in_cost_currency
             settleable_cost = min(remaining, left)
@@ -370,15 +378,24 @@ async def settle_by_amount(
                 split.left_to_settlement_amount_in_trip_currency - settleable_trip,
             )
 
+            settled_from_splits_settlement_curr += settleable_cost
+            settled_from_splits_trip_curr += settleable_trip
+
         split.is_settlement = (
             split.left_to_settlement_amount_in_trip_currency <= ZERO
             and split.left_to_settlement_amount_in_cost_currency <= ZERO
         )
         await sync_to_async(split.save)()
 
+        if expense.expense_id not in settled_expense_ids:
+            settled_expense_ids.append(expense.expense_id)
+
     # -----------------------------------------------------------------------
     # Phase 2: Settle prepayments (FIFO by created_date)
     # -----------------------------------------------------------------------
+    settled_from_prepayments_settlement_curr = ZERO
+    settled_from_prepayments_trip_curr = ZERO
+
     if remaining > ZERO:
         prepayments = await _load_settleable_prepayments(
             from_participant, to_participant, trip, currency, is_main_currency, trip_currency
@@ -393,14 +410,48 @@ async def settle_by_amount(
             remaining -= settleable
             await sync_to_async(prep.save)()
 
+            settled_from_prepayments_settlement_curr += settleable
+            prep_trip_amount = (settleable * prep.rate).quantize(Decimal("0.01"))
+            settled_from_prepayments_trip_curr += prep_trip_amount
+
     # -----------------------------------------------------------------------
-    # Phase 3: Recalculate & broadcast
+    # Phase 3: Log history, recalculate & broadcast
     # -----------------------------------------------------------------------
+    actor_id = await get_actor_participant_id(request, trip)
+    settle_currency = trip_currency if is_main_currency else currency
+
+    # Log splits settlement
+    if settled_from_splits_settlement_curr > ZERO:
+        await log_settlement(
+            trip=trip,
+            from_participant_id=from_participant.participant_id,
+            to_participant_id=to_participant.participant_id,
+            settlement_type=SettlementHistory.SettlementType.MANUAL_BY_AMOUNT,
+            amount_in_settlement_currency=settled_from_splits_settlement_curr,
+            settlement_currency=settle_currency,
+            amount_in_trip_currency=settled_from_splits_trip_curr,
+            related_expense_ids=settled_expense_ids,
+            actor_participant_id=actor_id,
+        )
+
+    # Log prepayment settlement
+    if settled_from_prepayments_settlement_curr > ZERO:
+        await log_settlement(
+            trip=trip,
+            from_participant_id=from_participant.participant_id,
+            to_participant_id=to_participant.participant_id,
+            settlement_type=SettlementHistory.SettlementType.MANUAL_BY_AMOUNT,
+            amount_in_settlement_currency=settled_from_prepayments_settlement_curr,
+            settlement_currency=settle_currency,
+            amount_in_trip_currency=settled_from_prepayments_trip_curr,
+            related_expense_ids=[],
+            actor_participant_id=actor_id,
+        )
+
     await recalculate_settlements(trip)
 
     settled_amount = amount_dec - remaining
 
-    actor_id = await get_actor_participant_id(request, trip)
     if actor_id == from_participant.participant_id:
         target_id = to_participant.participant_id
     else:
@@ -520,6 +571,9 @@ async def settle_by_costs(
     caller_id = caller_participant.participant_id
     settled_count = 0
 
+    # Group settlements by (from_id, to_id) pair for history logging
+    settlement_groups: dict[tuple[int, int], list[dict]] = defaultdict(list)
+
     for item in items:
         expense_id = item["expense_id"]
         participant_id = item["participant_id"]
@@ -554,15 +608,49 @@ async def settle_by_costs(
                 "message": f"Split not found for expense {expense_id}, participant {participant_id}.",
             }
 
+        # Track amounts before zeroing for history
+        settled_cost = split.left_to_settlement_amount_in_cost_currency
+        settled_trip = split.left_to_settlement_amount_in_trip_currency
+        expense_currency = expense.expense_currency.upper()
+
         split.left_to_settlement_amount_in_cost_currency = ZERO
         split.left_to_settlement_amount_in_trip_currency = ZERO
         split.is_settlement = True
         await sync_to_async(split.save)()
         settled_count += 1
 
+        # Group by participant pair for history
+        pair_key = (participant_id, payer_id)
+        settlement_groups[pair_key].append({
+            "expense_id": expense_id,
+            "settled_cost": settled_cost,
+            "settled_trip": settled_trip,
+            "expense_currency": expense_currency,
+        })
+
+    # Log history per pair
+    actor_id = await get_actor_participant_id(request, trip)
+    trip_currency = trip.default_currency.upper()
+
+    for (from_id, to_id), group in settlement_groups.items():
+        total_trip = sum(g["settled_trip"] for g in group)
+        expense_ids = [g["expense_id"] for g in group]
+
+        # Use trip currency as settlement currency for settle_by_costs
+        await log_settlement(
+            trip=trip,
+            from_participant_id=from_id,
+            to_participant_id=to_id,
+            settlement_type=SettlementHistory.SettlementType.MANUAL_BY_COSTS,
+            amount_in_settlement_currency=total_trip,
+            settlement_currency=trip_currency,
+            amount_in_trip_currency=total_trip,
+            related_expense_ids=expense_ids,
+            actor_participant_id=actor_id,
+        )
+
     await recalculate_settlements(trip)
 
-    actor_id = await get_actor_participant_id(request, trip)
     other_ids = set()
     for item in items:
         expense = await sync_to_async(Expense.objects.get)(expense_id=item["expense_id"], trip=trip)

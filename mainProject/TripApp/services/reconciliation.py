@@ -9,7 +9,8 @@ Called from:
 
 from decimal import Decimal
 from asgiref.sync import sync_to_async
-from TripApp.models import Prepayment, Split, Expense, Trip
+from TripApp.models import Prepayment, Split, Expense, Trip, SettlementHistory
+from TripApp.services.settlement_history import log_settlement
 
 
 ZERO = Decimal("0.00")
@@ -32,12 +33,6 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
     Try to settle a single split using available prepayments (FIFO by created_date).
 
     Called after a new expense is created — for each split where participant != payer.
-
-    Prepayment matching rules:
-      - from_participant = split.participant (the one who owes)
-      - to_participant   = expense.payer     (the one who paid)
-      - Prepayment in trip currency  → can settle splits in ANY currency
-      - Prepayment in other currency → can only settle splits in THAT currency
     """
     if split.left_to_settlement_amount_in_trip_currency <= ZERO:
         return
@@ -65,6 +60,8 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
             break
 
         prep_currency = prepayment.currency.upper()
+        settled_cost = ZERO
+        settled_trip = ZERO
 
         if prep_currency == trip_currency:
             settleable_trip = _min_positive(
@@ -85,6 +82,9 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
                 split.left_to_settlement_amount_in_cost_currency - settleable_cost,
             )
 
+            settled_cost = settleable_trip  # in trip currency
+            settled_trip = settleable_trip
+
         elif prep_currency == expense_currency and expense_currency != trip_currency:
             settleable_cost = _min_positive(
                 prepayment.amount_left,
@@ -100,10 +100,27 @@ async def apply_prepayments_to_split(split: Split, trip: Trip) -> None:
                 split.left_to_settlement_amount_in_trip_currency - settleable_trip,
             )
 
+            settled_cost = settleable_cost
+            settled_trip = settleable_trip
+
         else:
             continue
 
         await sync_to_async(prepayment.save)()
+
+        # Log auto-prepayment settlement
+        if settled_trip > ZERO:
+            await log_settlement(
+                trip=trip,
+                from_participant_id=participant_id,
+                to_participant_id=payer_id,
+                settlement_type=SettlementHistory.SettlementType.AUTO_PREPAYMENT,
+                amount_in_settlement_currency=settled_cost,
+                settlement_currency=prep_currency,
+                amount_in_trip_currency=settled_trip,
+                related_expense_ids=[expense.expense_id],
+                actor_participant_id=None,
+            )
 
     _update_is_settlement(split)
     await sync_to_async(split.save)()
@@ -144,6 +161,8 @@ async def apply_prepayment_to_splits(prepayment: Prepayment, trip: Trip) -> None
         expense = split.expense
         expense_currency = expense.expense_currency.upper()
         rate = expense.rate
+        settled_cost = ZERO
+        settled_trip = ZERO
 
         if prep_currency == trip_currency:
             settleable_trip = _min_positive(
@@ -164,6 +183,9 @@ async def apply_prepayment_to_splits(prepayment: Prepayment, trip: Trip) -> None
                 split.left_to_settlement_amount_in_cost_currency - settleable_cost,
             )
 
+            settled_cost = settleable_trip
+            settled_trip = settleable_trip
+
         else:
             settleable_cost = _min_positive(
                 prepayment.amount_left,
@@ -179,8 +201,25 @@ async def apply_prepayment_to_splits(prepayment: Prepayment, trip: Trip) -> None
                 split.left_to_settlement_amount_in_trip_currency - settleable_trip,
             )
 
+            settled_cost = settleable_cost
+            settled_trip = settleable_trip
+
         _update_is_settlement(split)
         await sync_to_async(split.save)()
+
+        # Log auto-prepayment settlement
+        if settled_trip > ZERO:
+            await log_settlement(
+                trip=trip,
+                from_participant_id=from_id,
+                to_participant_id=to_id,
+                settlement_type=SettlementHistory.SettlementType.AUTO_PREPAYMENT,
+                amount_in_settlement_currency=settled_cost,
+                settlement_currency=prep_currency,
+                amount_in_trip_currency=settled_trip,
+                related_expense_ids=[expense.expense_id],
+                actor_participant_id=None,
+            )
 
     await sync_to_async(prepayment.save)()
 
@@ -190,15 +229,6 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
     Cross-settle a new split against existing opposing splits (FIFO by expense created_at).
 
     Called after a new expense is created — for each split where participant != payer.
-
-    If P1 paid and P2 has a split (P2 owes P1), we look for existing splits where
-    P1 owes P2 (P2 paid, P1 has split) and settle them against each other.
-
-    Currency rules:
-      - Expense in trip currency → cross-settle only against splits in trip currency
-        (work in trip currency)
-      - Expense in other currency → cross-settle only against splits in same currency
-        (work in cost currency)
     """
     if split.left_to_settlement_amount_in_trip_currency <= ZERO:
         return
@@ -210,8 +240,6 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
     trip_currency = trip.default_currency.upper()
     new_rate = expense.rate
 
-    # New split: participant owes payer
-    # Look for opposing: payer owes participant (payer has split, participant paid)
     base_qs = Split.objects.filter(
         participant_id=payer_id,
         expense__payer_id=participant_id,
@@ -220,12 +248,9 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
         left_to_settlement_amount_in_trip_currency__gt=ZERO,
     ).select_related("expense").order_by("expense__created_at")
 
-    # Currency matching
     if expense_currency == trip_currency:
-        # Trip currency expense → only cross-settle with trip currency expenses
         base_qs = base_qs.filter(expense__expense_currency__iexact=trip_currency)
     else:
-        # Other currency expense → only cross-settle with same currency expenses
         base_qs = base_qs.filter(expense__expense_currency__iexact=expense_currency)
 
     opposing_splits = await sync_to_async(lambda: list(base_qs))()
@@ -236,15 +261,15 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
 
         opposing_expense = opposing.expense
         opposing_rate = opposing_expense.rate
+        settled_cost = ZERO
+        settled_trip = ZERO
 
         if expense_currency == trip_currency:
-            # Both in trip currency — settle in trip currency
             settleable_trip = _min_positive(
                 split.left_to_settlement_amount_in_trip_currency,
                 opposing.left_to_settlement_amount_in_trip_currency,
             )
 
-            # Deduct from new split
             split.left_to_settlement_amount_in_trip_currency -= settleable_trip
             if new_rate and new_rate != ZERO:
                 settleable_new_cost = (settleable_trip / new_rate).quantize(Decimal("0.01"))
@@ -255,7 +280,6 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
                 split.left_to_settlement_amount_in_cost_currency - settleable_new_cost,
             )
 
-            # Deduct from opposing split
             opposing.left_to_settlement_amount_in_trip_currency -= settleable_trip
             if opposing_rate and opposing_rate != ZERO:
                 settleable_opp_cost = (settleable_trip / opposing_rate).quantize(Decimal("0.01"))
@@ -266,14 +290,15 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
                 opposing.left_to_settlement_amount_in_cost_currency - settleable_opp_cost,
             )
 
+            settled_cost = settleable_trip
+            settled_trip = settleable_trip
+
         else:
-            # Both in same non-trip currency — settle in cost currency
             settleable_cost = _min_positive(
                 split.left_to_settlement_amount_in_cost_currency,
                 opposing.left_to_settlement_amount_in_cost_currency,
             )
 
-            # Deduct from new split
             split.left_to_settlement_amount_in_cost_currency -= settleable_cost
             settleable_new_trip = (settleable_cost * new_rate).quantize(Decimal("0.01"))
             split.left_to_settlement_amount_in_trip_currency = max(
@@ -281,7 +306,6 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
                 split.left_to_settlement_amount_in_trip_currency - settleable_new_trip,
             )
 
-            # Deduct from opposing split
             opposing.left_to_settlement_amount_in_cost_currency -= settleable_cost
             settleable_opp_trip = (settleable_cost * opposing_rate).quantize(Decimal("0.01"))
             opposing.left_to_settlement_amount_in_trip_currency = max(
@@ -289,8 +313,27 @@ async def cross_settle_split(split: Split, trip: Trip) -> None:
                 opposing.left_to_settlement_amount_in_trip_currency - settleable_opp_trip,
             )
 
+            settled_cost = settleable_cost
+            settled_trip = settleable_new_trip
+
         _update_is_settlement(opposing)
         await sync_to_async(opposing.save)()
+
+        # Log auto cross-settlement
+        if settled_trip > ZERO:
+            related_ids = [expense.expense_id, opposing_expense.expense_id]
+            # Log from participant's perspective (participant owes payer)
+            await log_settlement(
+                trip=trip,
+                from_participant_id=participant_id,
+                to_participant_id=payer_id,
+                settlement_type=SettlementHistory.SettlementType.AUTO_CROSS_SETTLE,
+                amount_in_settlement_currency=settled_cost,
+                settlement_currency=expense_currency,
+                amount_in_trip_currency=settled_trip,
+                related_expense_ids=related_ids,
+                actor_participant_id=None,
+            )
 
     _update_is_settlement(split)
     await sync_to_async(split.save)()
