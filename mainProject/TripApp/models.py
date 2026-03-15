@@ -71,16 +71,23 @@ class Prepayment(models.Model):
     created_date = models.DateTimeField(auto_now_add=True)
 
 
-class SettlementTripCurrency(models.Model):
-    trip = models.ForeignKey(Trip, on_delete=models.CASCADE)
-    from_participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="settlement_main_from")
-    to_participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="settlement_main_to")
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+class ParticipantRelation(models.Model):
+    trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name="participant_relations")
+    participant_a = models.ForeignKey(
+        Participant, on_delete=models.CASCADE, related_name="relations_as_a"
+    )
+    participant_b = models.ForeignKey(
+        Participant, on_delete=models.CASCADE, related_name="relations_as_b"
+    )
 
+    left_for_settled = models.JSONField(default=list)
+    all_related_amount = models.JSONField(default=list)
+    prepayment_details = models.JSONField(default=dict)
 
-class SettlementOtherCurrency(models.Model):
-    trip = models.ForeignKey(Trip, on_delete=models.CASCADE)
-    from_participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="settlement_other_from")
-    to_participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="settlement_other_to")
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    currency = models.CharField(max_length=5)
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["trip", "participant_a", "participant_b"],
+                name="unique_relation_per_trip"
+            ),
+        ]
