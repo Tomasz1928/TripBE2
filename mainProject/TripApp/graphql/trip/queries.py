@@ -37,6 +37,22 @@ def _to_breakdown_list(lst: list[dict]) -> list[SettlementBreakdownEntryType]:
     return [_to_breakdown_entry(d) for d in lst]
 
 
+def _to_settlement_history(lst: list[dict]) -> list[SettlementHistoryType]:
+    return [
+        SettlementHistoryType(
+            id=h["id"],
+            settlement_type=SettlementHistoryEventType(h["settlement_type"]),
+            actor_nickname=h["actor_nickname"],
+            amount_in_settlement_currency=h["amount_in_settlement_currency"],
+            settlement_currency=h["settlement_currency"],
+            amount_in_trip_currency=h["amount_in_trip_currency"],
+            related_expense_names=h["related_expense_names"],
+            created_at=h["created_at"],
+        )
+        for h in lst
+    ]
+
+
 @strawberry.type
 class TripQuery:
 
@@ -114,7 +130,7 @@ class TripQuery:
             for p in data["participants"]
         ]
 
-        # Settlement
+        # Settlement (with history per relation)
         settlement_data = data.get("settlement")
         settlement = None
         if settlement_data and settlement_data.get("relations"):
@@ -135,28 +151,13 @@ class TripQuery:
                                 for h in r["prepayment"]["history"]
                             ],
                         ),
+                        settlement_history=_to_settlement_history(
+                            r.get("settlement_history", [])
+                        ),
                     )
                     for r in settlement_data["relations"]
                 ]
             )
-
-        # Settlement History
-        settlement_history = [
-            SettlementHistoryType(
-                id=h["id"],
-                settlement_type=SettlementHistoryEventType(h["settlement_type"]),
-                actor_participant_id=h["actor_participant_id"],
-                actor_nickname=h["actor_nickname"],
-                other_participant_id=h["other_participant_id"],
-                other_nickname=h["other_nickname"],
-                amount_in_settlement_currency=h["amount_in_settlement_currency"],
-                settlement_currency=h["settlement_currency"],
-                amount_in_trip_currency=h["amount_in_trip_currency"],
-                related_expense_ids=h["related_expense_ids"],
-                created_at=h["created_at"],
-            )
-            for h in data.get("settlement_history", [])
-        ]
 
         return TripDetailType(
             id=data["id"],
@@ -174,5 +175,4 @@ class TripQuery:
             expenses=expenses,
             participants=participants,
             settlement=settlement,
-            settlement_history=settlement_history,
         )

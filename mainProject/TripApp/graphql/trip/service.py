@@ -138,11 +138,28 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         )
     )()
 
+    # Load settlement history only for my relations (single query)
+    my_history = await sync_to_async(
+        lambda: list(
+            SettlementHistory.objects.filter(trip=trip)
+            .filter(models_q_participant_a_or_b(my_id))
+            .select_related("actor_participant")
+            .order_by("-created_at")
+        )
+    )()
+
+    # Group history by ordered pair (a_id, b_id) for efficient lookup
+    history_by_pair: dict[tuple[int, int], list] = defaultdict(list)
+    for record in my_history:
+        pair = (record.participant_a_id, record.participant_b_id)
+        history_by_pair[pair].append(record)
+
     splits_by_expense: dict[int, list] = defaultdict(list)
     for s in all_splits:
         splits_by_expense[s.expense_id].append(s)
 
     participant_map = {p.participant_id: p for p in all_participants}
+    expense_map = {e.expense_id: e.title for e in all_expenses}
 
     total_expenses = float(sum(e.amount_in_trip_currency for e in all_expenses) or 0)
 
@@ -159,18 +176,9 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
     expenses = _build_expenses(all_expenses, splits_by_expense, participant_map, trip_currency)
     participants = _build_participants(all_participants, all_splits, trip, trip_currency)
 
-    settlement = _build_settlement_from_relations(my_id, my_relations, participant_map)
-
-    # --- Settlement History ---
-    my_history = await sync_to_async(
-        lambda: list(
-            SettlementHistory.objects.filter(trip=trip).filter(
-                models_q_participant_a_or_b(my_id)
-            ).select_related("actor_participant")
-            .order_by("-created_at")
-        )
-    )()
-    settlement_history = _build_settlement_history(my_id, my_history, participant_map)
+    settlement = _build_settlement_from_relations(
+        my_id, my_relations, participant_map, history_by_pair, expense_map
+    )
 
     return {
         "id": trip.trip_id,
@@ -188,7 +196,6 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         "expenses": expenses,
         "participants": participants,
         "settlement": settlement,
-        "settlement_history": settlement_history,
     }
 
 
@@ -384,6 +391,8 @@ def _build_settlement_from_relations(
     my_id: int,
     my_relations: list,
     participant_map: dict,
+    history_by_pair: dict[tuple[int, int], list],
+    expense_map: dict[int, str],
 ) -> dict:
     relations = []
 
@@ -438,6 +447,16 @@ def _build_settlement_from_relations(
             for h in prepayment_details.get("history", [])
         ]
 
+        # Settlement history for this specific relation
+        pair = (
+            min(my_id, other_id),
+            max(my_id, other_id),
+        )
+        pair_history = history_by_pair.get(pair, [])
+        settlement_history = _build_relation_settlement_history(
+            my_id, pair_history, participant_map, expense_map
+        )
+
         relations.append({
             "related_id": other_id,
             "related_name": other_p.nickname if other_p else "Unknown",
@@ -447,9 +466,60 @@ def _build_settlement_from_relations(
                 "amount_left": amount_left,
                 "history": history,
             },
+            "settlement_history": settlement_history,
         })
 
     return {"relations": relations}
+
+
+# ---------------------------------------------------------------------------
+# Helper: build settlement history for a single relation (from my perspective)
+# ---------------------------------------------------------------------------
+
+def _build_relation_settlement_history(
+    my_id: int,
+    history_records: list,
+    participant_map: dict,
+    expense_map: dict[int, str],
+) -> list[dict]:
+    """
+    Build settlement history entries for a single relation.
+
+    Sign convention: positive = I paid/settled towards the other person,
+    negative = the other person paid/settled towards me.
+    """
+    result = []
+
+    for record in history_records:
+        # Determine sign: if I am participant_a, use raw values;
+        # if I am participant_b, flip sign.
+        if record.participant_a_id == my_id:
+            sign = 1.0
+        else:
+            sign = -1.0
+
+        actor_nickname = None
+        if record.actor_participant_id is not None:
+            actor_p = participant_map.get(record.actor_participant_id)
+            actor_nickname = actor_p.nickname if actor_p else "Unknown"
+
+        related_names = [
+            expense_map.get(eid, "Unknown")
+            for eid in (record.related_expenses or [])
+        ]
+
+        result.append({
+            "id": record.id,
+            "settlement_type": record.settlement_type,
+            "actor_nickname": actor_nickname,
+            "amount_in_settlement_currency": float(record.amount_in_settlement_currency) * sign,
+            "settlement_currency": record.settlement_currency,
+            "amount_in_trip_currency": float(record.amount_in_trip_currency) * sign,
+            "related_expense_names": related_names,
+            "created_at": record.created_at.timestamp() * 1000,
+        })
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -496,46 +566,3 @@ async def create_trip(
     )
 
     return {"success": True, "message": "Trip created successfully.", "trip": trip}
-
-
-# ---------------------------------------------------------------------------
-# Helper: build settlement history (from my perspective)
-# ---------------------------------------------------------------------------
-
-def _build_settlement_history(
-    my_id: int,
-    history_records: list,
-    participant_map: dict,
-) -> list[dict]:
-    result = []
-
-    for record in history_records:
-        if record.participant_a_id == my_id:
-            other_id = record.participant_b_id
-        else:
-            other_id = record.participant_a_id
-
-        other_p = participant_map.get(other_id)
-
-        actor_id = None
-        actor_nickname = None
-        if record.actor_participant_id is not None:
-            actor_id = record.actor_participant_id
-            actor_p = participant_map.get(actor_id)
-            actor_nickname = actor_p.nickname if actor_p else "Unknown"
-
-        result.append({
-            "id": record.id,
-            "settlement_type": record.settlement_type,
-            "actor_participant_id": actor_id,
-            "actor_nickname": actor_nickname,
-            "other_participant_id": other_id,
-            "other_nickname": other_p.nickname if other_p else "Unknown",
-            "amount_in_settlement_currency": float(record.amount_in_settlement_currency),
-            "settlement_currency": record.settlement_currency,
-            "amount_in_trip_currency": float(record.amount_in_trip_currency),
-            "related_expense_ids": record.related_expenses or [],
-            "created_at": record.created_at.timestamp() * 1000,
-        })
-
-    return result

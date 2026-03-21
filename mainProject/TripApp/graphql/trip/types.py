@@ -98,6 +98,29 @@ class ParticipantDetailType:
     is_active: bool
 
 
+# --- Settlement History (simplified — context comes from relation) ---
+
+@strawberry.enum
+class SettlementHistoryEventType(Enum):
+    MANUAL_BY_AMOUNT = "MANUAL_BY_AMOUNT"
+    MANUAL_BY_COSTS = "MANUAL_BY_COSTS"
+    MANUAL_BY_PREPAYMENT = "MANUAL_BY_PREPAYMENT"
+    AUTO_PREPAYMENT = "AUTO_PREPAYMENT"
+    AUTO_CROSS_SETTLE = "AUTO_CROSS_SETTLE"
+
+
+@strawberry.type
+class SettlementHistoryType:
+    id: int
+    settlement_type: SettlementHistoryEventType
+    actor_nickname: Optional[str]
+    amount_in_settlement_currency: float
+    settlement_currency: str
+    amount_in_trip_currency: float
+    related_expense_names: List[str]
+    created_at: float  # timestamp ms
+
+
 # --- Settlement ---
 
 @strawberry.type
@@ -119,37 +142,12 @@ class SettlementRelationType:
     left_for_settled: List[SimpleMoneyValueType]
     all_related_amount: List[SimpleMoneyValueType]
     prepayment: PrepaymentDetailsType
+    settlement_history: List[SettlementHistoryType]
 
 
 @strawberry.type
 class SettlementType:
     relations: List[SettlementRelationType]
-
-
-# --- Settlement History ---
-
-@strawberry.enum
-class SettlementHistoryEventType(Enum):
-    MANUAL_BY_AMOUNT = "MANUAL_BY_AMOUNT"
-    MANUAL_BY_COSTS = "MANUAL_BY_COSTS"
-    MANUAL_BY_PREPAYMENT = "MANUAL_BY_PREPAYMENT"
-    AUTO_PREPAYMENT = "AUTO_PREPAYMENT"
-    AUTO_CROSS_SETTLE = "AUTO_CROSS_SETTLE"
-
-
-@strawberry.type
-class SettlementHistoryType:
-    id: int
-    settlement_type: SettlementHistoryEventType
-    actor_participant_id: Optional[int]
-    actor_nickname: Optional[str]
-    other_participant_id: int
-    other_nickname: str
-    amount_in_settlement_currency: float
-    settlement_currency: str
-    amount_in_trip_currency: float
-    related_expense_ids: List[int]
-    created_at: float  # timestamp ms
 
 
 # --- Trip Details (full) ---
@@ -171,7 +169,6 @@ class TripDetailType:
     expenses: List[ExpenseDetailType]
     participants: List[ParticipantDetailType]
     settlement: Optional[SettlementType]
-    settlement_history: List[SettlementHistoryType]
 
 
 # --- Payloads ---

@@ -56,6 +56,7 @@ type Mutation {
   addPrepayment(tripId: Int!, participantId: Int!, amount: Float!, currency: String!, direction: String!): MutationPayload!
   settleByAmount(tripId: Int!, fromUserId: Int!, toUserId: Int!, amount: Float!, currency: String!, isMainCurrency: Boolean!): MutationPayload!
   settleByCosts(tripId: Int!, items: [SettleByCostsItem!]!): MutationPayload!
+  settleByPrepayment(tripId: Int!, fromUserId: Int!, toUserId: Int!, amount: Float!, currency: String!, isMainCurrency: Boolean!): MutationPayload!
 }
 
 type MutationPayload {
@@ -88,6 +89,7 @@ type Query {
   tripList: TripListType!
   tripDetails(tripId: Int!): TripDetailType!
   tripSettlements(tripId: Int!): TripSettlementsType!
+  availableCurrencies: [String!]!
 }
 
 type SessionInfo {
@@ -97,8 +99,41 @@ type SessionInfo {
 
 input SettleByCostsItem {
   expenseId: Int!
-  payerId: Int!
   participantId: Int!
+}
+
+type SettlementBreakdownEntryType {
+  type: SettlementBreakdownType!
+  amountCost: Float!
+  amountTrip: Float!
+}
+
+enum SettlementBreakdownType {
+  SELF
+  MANUAL_BY_AMOUNT
+  MANUAL_BY_COSTS
+  AUTO_PREPAYMENT
+  AUTO_CROSS_SETTLE
+  UNSETTLED
+}
+
+enum SettlementHistoryEventType {
+  MANUAL_BY_AMOUNT
+  MANUAL_BY_COSTS
+  MANUAL_BY_PREPAYMENT
+  AUTO_PREPAYMENT
+  AUTO_CROSS_SETTLE
+}
+
+type SettlementHistoryType {
+  id: Int!
+  settlementType: SettlementHistoryEventType!
+  actorNickname: String
+  amountInSettlementCurrency: Float!
+  settlementCurrency: String!
+  amountInTripCurrency: Float!
+  relatedExpenseNames: [String!]!
+  createdAt: Float!
 }
 
 type SettlementOtherCurrencyType {
@@ -116,6 +151,7 @@ type SettlementRelationType {
   leftForSettled: [SimpleMoneyValueType!]!
   allRelatedAmount: [SimpleMoneyValueType!]!
   prepayment: PrepaymentDetailsType!
+  settlementHistory: [SettlementHistoryType!]!
 }
 
 type SettlementTripCurrencyType {
@@ -141,6 +177,8 @@ type ShareType {
   participantNickname: String!
   splitValue: [SimpleMoneyValueType!]!
   isSettlement: Boolean!
+  leftForSettlement: [SimpleMoneyValueType!]!
+  settlementBreakdown: [SettlementBreakdownEntryType!]!
 }
 
 input SimpleMoneyValueInput {
@@ -158,14 +196,6 @@ type Subscription {
   tripUpdates(tripId: Int!): TripNotification!
 }
 
-type TripNotification {
-  tripId: Int!
-  tripName: String!
-  eventType: TripEventType!
-  actorNickname: String!
-  actorParticipantId: Int!
-}
-
 type TripDetailType {
   id: Int!
   title: String!
@@ -177,6 +207,7 @@ type TripDetailType {
   categories: [CategoryType!]!
   ownerId: Int!
   imOwner: Boolean!
+  myParticipantId: Int!
   myCost: [SimpleMoneyValueType!]!
   expenses: [ExpenseDetailType!]!
   participants: [ParticipantDetailType!]!
@@ -207,6 +238,14 @@ type TripListItemType {
 
 type TripListType {
   trips: [TripListItemType!]!
+}
+
+type TripNotification {
+  tripId: Int!
+  tripName: String!
+  eventType: TripEventType!
+  actorNickname: String!
+  actorParticipantId: Int!
 }
 
 type TripSettlementsType {
