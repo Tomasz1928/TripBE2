@@ -172,6 +172,7 @@ class TripQuery:
             im_owner=data["im_owner"],
             my_participant_id=data["my_participant_id"],
             my_cost=_to_money_list(data["my_cost"]),
+            total_trip_cost=_to_money_list(data["total_trip_cost"]),
             expenses=expenses,
             participants=participants,
             settlement=settlement,

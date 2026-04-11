@@ -168,6 +168,7 @@ class TripDetailType:
     my_cost: List[SimpleMoneyValueType]
     expenses: List[ExpenseDetailType]
     participants: List[ParticipantDetailType]
+    total_trip_cost: List[SimpleMoneyValueType]
     settlement: Optional[SettlementType]
 
 

@@ -173,6 +173,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
     ]
 
     my_cost = _compute_my_cost(all_splits, my_id, trip_currency)
+    total_trip_cost = _compute_total_trip_cost(all_splits, trip_currency)
     expenses = _build_expenses(all_expenses, splits_by_expense, participant_map, trip_currency)
     participants = _build_participants(all_participants, all_splits, trip, trip_currency)
 
@@ -196,6 +197,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
         "expenses": expenses,
         "participants": participants,
         "settlement": settlement,
+        "total_trip_cost": total_trip_cost,
     }
 
 
@@ -226,7 +228,47 @@ def _compute_my_cost(
             "is_main_currency": True,
             "currency": trip_currency,
             "amount": float(total_in_trip_currency),
-        }
+        },
+        {
+            "is_main_currency": False,
+            "currency": trip_currency,
+            "amount": float(cost_by_currency.get(trip_currency, ZERO)),
+        },
+    ]
+
+    for curr, amount in cost_by_currency.items():
+        if curr != trip_currency:
+            result.append({
+                "is_main_currency": False,
+                "currency": curr,
+                "amount": float(amount),
+            })
+
+    return result
+
+
+def _compute_total_trip_cost(
+    all_splits: list, trip_currency: str
+) -> list[dict]:
+    cost_by_currency: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    total_in_trip_currency = ZERO
+
+    for split in all_splits:
+        expense_currency = split.expense.expense_currency.upper()
+        cost_by_currency[expense_currency] += split.amount_in_cost_currency
+        total_in_trip_currency += split.amount_in_trip_currency
+
+    result = [
+        {
+            "is_main_currency": True,
+            "currency": trip_currency,
+            "amount": float(total_in_trip_currency),
+        },
+        {
+            "is_main_currency": False,
+            "currency": trip_currency,
+            "amount": float(cost_by_currency.get(trip_currency, ZERO)),
+        },
     ]
 
     for curr, amount in cost_by_currency.items():
