@@ -5,15 +5,16 @@
 databases:
   - name: tripapp-db
     plan: free          # free tier: 256 MB, auto-expires after 90 days
+    region: frankfurt
     databaseName: tripapp
     user: tripapp_user
-    # ipAllowList: []   # uncomment to restrict access
 
 services:
   - type: web
     name: tripapp
     runtime: python
     plan: free          # free tier: spins down after 15 min inactivity
+    region: frankfurt
 
     # Build
     buildCommand: "./build.sh"
