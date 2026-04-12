@@ -35,17 +35,26 @@ async def _caller_is_involved(request: HttpRequest, expense: Expense) -> bool:
     )()
 
 
+async def _caller_is_trip_participant(request, expense) -> bool:
+    user = await sync_to_async(lambda: request.user)()
+    trip = await sync_to_async(lambda: expense.trip)()
+    return await sync_to_async(
+        lambda: Participant.objects.filter(trip=trip, user=user).exists()
+    )()
+
 # ---------------------------------------------------------------------------
 # Queries
 # ---------------------------------------------------------------------------
 
-async def get_receipt(request: HttpRequest, expense_id: int) -> dict | None:
+
+async def get_receipt(request, expense_id: int):
     try:
         expense = await sync_to_async(Expense.objects.get)(expense_id=expense_id)
     except Expense.DoesNotExist:
         return None
 
-    if not await _caller_is_involved(request, expense):
+    # Podgląd dostępny dla każdego uczestnika tripa (nie tylko expense)
+    if not await _caller_is_trip_participant(request, expense):
         return None
 
     receipt = await sync_to_async(
@@ -64,9 +73,8 @@ async def get_receipt(request: HttpRequest, expense_id: int) -> dict | None:
         "image_data": receipt.image_data,
         "receipt_hash": receipt.receipt_hash,
         "uploaded_by_nickname": uploaded_by_nickname,
-        "created_at": receipt.created_at.timestamp() * 1000
+        "created_at": receipt.created_at.timestamp() * 1000,
     }
-
 
 # ---------------------------------------------------------------------------
 # Mutations
