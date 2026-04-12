@@ -13,6 +13,7 @@ from TripApp.models import (
     SettlementHistory,
 )
 from TripApp.services.breakdown import get_full_breakdown
+from TripApp.graphql.receipt.has_receipt_mixin import batch_receipt_hashes
 
 ZERO = Decimal("0.00")
 
@@ -160,6 +161,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
 
     participant_map = {p.participant_id: p for p in all_participants}
     expense_map = {e.expense_id: e.title for e in all_expenses}
+    receipt_hashes = await batch_receipt_hashes([e.expense_id for e in all_expenses])
 
     total_expenses = float(sum(e.amount_in_trip_currency for e in all_expenses) or 0)
 
@@ -174,7 +176,7 @@ async def get_trip_details(request: HttpRequest, trip_id: int) -> dict:
 
     my_cost = _compute_my_cost(all_splits, my_id, trip_currency)
     total_trip_cost = _compute_total_trip_cost(all_splits, trip_currency)
-    expenses = _build_expenses(all_expenses, splits_by_expense, participant_map, trip_currency)
+    expenses = _build_expenses(all_expenses, splits_by_expense, participant_map, trip_currency, receipt_hashes)
     participants = _build_participants(all_participants, all_splits, trip, trip_currency)
 
     settlement = _build_settlement_from_relations(
@@ -291,8 +293,12 @@ def _build_expenses(
     splits_by_expense: dict,
     participant_map: dict,
     trip_currency: str,
+    receipt_hashes: dict[int, str] | None = None,
 ) -> list[dict]:
     expenses = []
+
+    if receipt_hashes is None:
+        receipt_hashes = {}
 
     for expense in all_expenses:
         splits = splits_by_expense.get(expense.expense_id, [])
@@ -341,7 +347,6 @@ def _build_expenses(
                     "amount": float(split.left_to_settlement_amount_in_cost_currency),
                 })
 
-            # Settlement breakdown — read from JSON field, compute UNSETTLED
             breakdown = get_full_breakdown(split)
 
             shared_with.append({
@@ -354,6 +359,7 @@ def _build_expenses(
             })
 
         payer = participant_map.get(expense.payer_id)
+        r_hash = receipt_hashes.get(expense.expense_id)
 
         expenses.append({
             "id": expense.expense_id,
@@ -367,6 +373,8 @@ def _build_expenses(
             "payer_id": expense.payer_id,
             "payer_nickname": payer.nickname if payer else "Unknown",
             "shared_with": shared_with,
+            "has_receipt": r_hash is not None,
+            "receipt_hash": r_hash,
         })
 
     return expenses

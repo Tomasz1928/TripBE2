@@ -82,6 +82,8 @@ class ExpenseDetailType:
     category_id: int
     payer_id: int
     payer_nickname: str
+    has_receipt: bool
+    receipt_hash: Optional[str]
     shared_with: List[ShareType]
 
 

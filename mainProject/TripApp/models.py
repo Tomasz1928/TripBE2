@@ -1,3 +1,5 @@
+import hashlib
+
 from django.db import models
 from django.contrib.auth.models import User
 from django.db.models import Q
@@ -129,3 +131,37 @@ class SettlementHistory(models.Model):
     amount_in_trip_currency = models.DecimalField(max_digits=10, decimal_places=2)
     related_expenses = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
+
+class Receipt(models.Model):
+    expense = models.OneToOneField(
+        'Expense',
+        on_delete=models.CASCADE,
+        related_name='receipt',
+        primary_key=True,
+    )
+    image_data = models.TextField(
+        help_text="Base64-encoded JPEG image"
+    )
+    receipt_hash = models.CharField(
+        max_length=32,
+        help_text="MD5 hash of image_data — used by clients to detect changes",
+        default="",
+    )
+    uploaded_by = models.ForeignKey(
+        'Participant',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='uploaded_receipts',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        """Auto-compute hash before save."""
+        if self.image_data:
+            self.receipt_hash = hashlib.md5(self.image_data.encode('utf-8')).hexdigest()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Receipt for Expense #{self.expense_id}"

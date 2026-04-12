@@ -90,3 +90,8 @@ async def build_participant_updated_notification(trip: Trip, actor_participant_i
 async def build_participant_removed_notification(trip: Trip, actor_participant_id: int) -> dict:
     nickname = await _get_actor_nickname(trip, actor_participant_id)
     return _build_notification(trip, "PARTICIPANT_REMOVED", nickname, actor_participant_id)
+
+
+async def build_receipt_changed_notification(trip: Trip, actor_participant_id: int) -> dict:
+    nickname = await _get_actor_nickname(trip, actor_participant_id)
+    return _build_notification(trip, "RECEIPT_CHANGED", nickname, actor_participant_id)

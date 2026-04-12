@@ -38,6 +38,8 @@ type ExpenseDetailType {
   categoryId: Int!
   payerId: Int!
   payerNickname: String!
+  hasReceipt: Boolean!
+  receiptHash: String
   sharedWith: [ShareType!]!
 }
 
@@ -57,6 +59,8 @@ type Mutation {
   settleByAmount(tripId: Int!, fromUserId: Int!, toUserId: Int!, amount: Float!, currency: String!, isMainCurrency: Boolean!): MutationPayload!
   settleByCosts(tripId: Int!, items: [SettleByCostsItem!]!): MutationPayload!
   settleByPrepayment(tripId: Int!, fromUserId: Int!, toUserId: Int!, amount: Float!, currency: String!, isMainCurrency: Boolean!): MutationPayload!
+  uploadReceipt(expenseId: Int!, imageData: String!): UploadReceiptPayload!
+  deleteReceipt(expenseId: Int!): UploadReceiptPayload!
 }
 
 type MutationPayload {
@@ -90,6 +94,15 @@ type Query {
   tripDetails(tripId: Int!): TripDetailType!
   tripSettlements(tripId: Int!): TripSettlementsType!
   availableCurrencies: [String!]!
+  expenseReceipt(expenseId: Int!): ReceiptType
+}
+
+type ReceiptType {
+  expenseId: Int!
+  imageData: String!
+  uploadedByNickname: String
+  receiptHash: String
+  createdAt: Float!
 }
 
 type SessionInfo {
@@ -211,6 +224,7 @@ type TripDetailType {
   myCost: [SimpleMoneyValueType!]!
   expenses: [ExpenseDetailType!]!
   participants: [ParticipantDetailType!]!
+  totalTripCost: [SimpleMoneyValueType!]!
   settlement: SettlementType
 }
 
@@ -223,6 +237,7 @@ enum TripEventType {
   PARTICIPANT_ADDED
   PARTICIPANT_UPDATED
   PARTICIPANT_REMOVED
+  RECEIPT_CHANGED
 }
 
 type TripListItemType {
@@ -264,6 +279,11 @@ input UpdateExpenseInput {
   date: Float!
   payerId: Int!
   sharedWith: [ShareInput!]!
+}
+
+type UploadReceiptPayload {
+  success: Boolean!
+  message: String!
 }
 
 type UserType {

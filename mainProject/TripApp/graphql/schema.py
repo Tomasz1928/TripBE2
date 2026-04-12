@@ -15,6 +15,8 @@ from .settlement.queries import SettlementQuery
 from .settlement.mutations import SettlementMutation
 from .subscriptions import Subscription
 from .currency.queries import CurrencyQuery
+from .receipt.queries import ReceiptQuery
+from .receipt.mutations import ReceiptMutation
 
 Query = merge_types(
     "Query",
@@ -22,7 +24,8 @@ Query = merge_types(
         AuthQuery,
         TripQuery,
         SettlementQuery,
-        CurrencyQuery
+        CurrencyQuery,
+        ReceiptQuery,
     ),
 )
 
@@ -35,6 +38,7 @@ Mutation = merge_types(
         ParticipantMutation,
         PrepaymentMutation,
         SettlementMutation,
+        ReceiptMutation,
     ),
 )
 

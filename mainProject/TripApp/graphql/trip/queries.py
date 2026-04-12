@@ -101,6 +101,8 @@ class TripQuery:
                 category_id=e["category_id"],
                 payer_id=e["payer_id"],
                 payer_nickname=e["payer_nickname"],
+                has_receipt=e["has_receipt"],
+                receipt_hash=e.get("receipt_hash"),
                 shared_with=[
                     ShareType(
                         participant_id=s["participant_id"],
