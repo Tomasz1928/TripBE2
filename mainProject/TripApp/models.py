@@ -16,7 +16,7 @@ class Trip(models.Model):
 
 
 class Participant(models.Model):
-    access_code = models.CharField(max_length=8, db_index=True, null=True, blank=True)
+    access_code = models.CharField(max_length=12, db_index=True, null=True, blank=True)
     trip = models.ForeignKey(Trip, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     nickname = models.CharField(max_length=25)
@@ -119,7 +119,7 @@ class SettlementHistory(models.Model):
     participant_b = models.ForeignKey(
         Participant, on_delete=models.CASCADE, related_name="settlement_history_as_b"
     )
-    settlement_type = models.CharField(max_length=20, choices=SettlementType.choices)
+    settlement_type = models.CharField(max_length=30, choices=SettlementType.choices)
 
     actor_participant = models.ForeignKey(
         Participant, on_delete=models.SET_NULL, null=True, blank=True,
