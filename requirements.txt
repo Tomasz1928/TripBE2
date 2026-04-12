@@ -1,10 +1,25 @@
+# ── Django ────────────────────────────────────────
 Django==6.0.2
 sqlparse==0.5.5
+ 
+# ── GraphQL (Strawberry) ─────────────────────────
 strawberry-graphql[django]==0.306.0
+ 
+# ── ASGI + WebSockets ────────────────────────────
 channels==4.3.2
 daphne==4.2.1
+ 
+# ── HTTP client (exchange rates) ─────────────────
 requests==2.33.1
+ 
+# ── Starlette (required by strawberry.asgi) ──────
+starlette>=0.52
+ 
+# ── PostgreSQL driver ────────────────────────────
 psycopg2-binary>=2.9
+ 
+# ── Render / Production ──────────────────────────
 whitenoise>=6.5
 dj-database-url>=2.1
 gunicorn>=22.0
+ 
