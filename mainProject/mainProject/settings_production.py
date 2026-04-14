@@ -75,17 +75,35 @@ SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "True") == "True"
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "formatters": {
+        "render": {
+            "format": "[{asctime}] {levelname} {name} | {message}",
+            "style": "{",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
+            "formatter": "render",
         },
     },
     "root": {
         "handlers": ["console"],
-        "level": "INFO",
+        "level": "WARNING",
     },
     "loggers": {
         "django": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "TripApp": {
             "handlers": ["console"],
             "level": "INFO",
             "propagate": False,
