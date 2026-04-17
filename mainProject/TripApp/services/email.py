@@ -14,8 +14,8 @@ from mailjet_rest import Client
 
 
 def _get_client() -> Client:
-    api_key = os.environ.get("MAILJET_API_KEY", "bd64f2a2d047bacf4037ee0fcac6a1a1")
-    api_secret = os.environ.get("MAILJET_API_SECRET", "5c655b902c2df45f2c83a8219f1ea757")
+    api_key = os.environ.get("MAILJET_API_KEY", "")
+    api_secret = os.environ.get("MAILJET_API_SECRET", "")
     if not api_key or not api_secret:
         raise RuntimeError(
             "Mailjet credentials missing. Set MAILJET_API_KEY and MAILJET_API_SECRET."
