@@ -6,6 +6,7 @@ from typing import Optional
 class UserType:
     id: int
     username: str
+    email: str
 
 
 @strawberry.type

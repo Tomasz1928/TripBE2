@@ -44,9 +44,12 @@ type ExpenseDetailType {
 }
 
 type Mutation {
-  registerUser(username: String!, password: String!): AuthPayload!
+  registerUser(username: String!, password: String!, email: String!): AuthPayload!
   loginUser(username: String!, password: String!): AuthPayload!
   logoutUser: AuthPayload!
+  resetPassword(username: String!, email: String!): AuthPayload!
+  changeEmail(newEmail: String!): AuthPayload!
+  changePassword(newPassword: String!, newPasswordConfirm: String!): AuthPayload!
   createTrip(title: String!, dateStart: Float!, dateEnd: Float!, description: String! = "", currency: String! = "PLN"): CreateTripPayload!
   addExpense(data: AddExpenseInput!): MutationPayload!
   updateExpense(data: UpdateExpenseInput!): MutationPayload!
@@ -289,4 +292,5 @@ type UploadReceiptPayload {
 type UserType {
   id: Int!
   username: String!
+  email: String!
 }

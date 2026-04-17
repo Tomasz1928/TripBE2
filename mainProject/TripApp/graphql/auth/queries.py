@@ -14,5 +14,9 @@ class AuthQuery:
         user = result["user"]
         return SessionInfo(
             is_authenticated=result["is_authenticated"],
-            user=UserType(id=user.id, username=user.username) if user else None,
+            user=UserType(
+                id=user.id,
+                username=user.username,
+                email=user.email or "",
+            ) if user else None,
         )

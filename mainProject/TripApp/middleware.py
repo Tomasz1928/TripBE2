@@ -8,11 +8,17 @@ import time
 logger = logging.getLogger("TripApp.graphql")
 
 PUBLIC_OPERATIONS = {
-    "loginUser", "login_user",
-    "registerUser", "register_user",
-    "logoutUser", "logout_user",
+    "loginUser",
+    "login_user",
+    "registerUser",
+    "register_user",
+    "logoutUser",
+    "logout_user",
+    "resetPassword",
+    "reset_password",
     "session",
-    "__schema", "__type",
+    "__schema",
+    "__type",
 }
 
 
