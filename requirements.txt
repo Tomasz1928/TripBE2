@@ -24,4 +24,4 @@ dj-database-url>=2.1
 gunicorn>=22.0
 
 # ── Email (Mailjet) ──────────────────────────────
-mailjet-rest>=2.2.4
+mailjet-rest>=1.5.1
